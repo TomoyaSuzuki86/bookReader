@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <item name="library_panel" type="id" />
+  <item name="book_back_panel" type="id" />
   <item name="left_page_panel" type="id" />
   <item name="right_page_panel" type="id" />
   <item name="toolbar_panel" type="id" />

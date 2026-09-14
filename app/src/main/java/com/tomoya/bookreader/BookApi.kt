@@ -49,9 +49,21 @@ class BookApi(private val baseUrl: String) {
   }
 
   fun download(bookId: String, token: String, target: File) {
-    val c = connection("/api/books/$bookId/file", "GET", token)
-    if (c.responseCode !in 200..299) error("PDF download failed (${c.responseCode})")
-    c.inputStream.use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+    val partial = File(target.parentFile, target.name + ".part")
+    partial.delete()
+    try {
+      val c = connection("/api/books/$bookId/file", "GET", token)
+      if (c.responseCode !in 200..299) error("PDF download failed (${c.responseCode})")
+      c.inputStream.use { input -> partial.outputStream().use { output -> input.copyTo(output) } }
+      if (partial.length() == 0L) error("Downloaded PDF is empty")
+      if (target.exists()) target.delete()
+      if (!partial.renameTo(target)) {
+        partial.copyTo(target, overwrite = true)
+        partial.delete()
+      }
+    } finally {
+      if (partial.exists()) partial.delete()
+    }
   }
 
   fun saveProgress(bookId: String, token: String, page: Int) {
@@ -59,7 +71,8 @@ class BookApi(private val baseUrl: String) {
     c.doOutput = true
     c.setRequestProperty("Content-Type", "application/json")
     c.outputStream.bufferedWriter().use { it.write(JSONObject().put("page", page).toString()) }
-    readBody(c)
+    val body = readBody(c)
+    if (c.responseCode !in 200..299) error(JSONObject(body).optString("error", "Progress update failed"))
   }
 
   private fun readBody(c: HttpURLConnection): String {

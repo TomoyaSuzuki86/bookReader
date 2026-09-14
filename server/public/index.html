@@ -1,1 +1,173 @@
-<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BookReader Upload</title><style>body{font-family:system-ui;max-width:720px;margin:40px auto;padding:20px;background:#111;color:#eee}input,button{font:inherit;padding:12px;margin:6px 0;width:100%;box-sizing:border-box}button{cursor:pointer}li{margin:10px 0}.row{display:flex;gap:10px}.row>*{flex:1}</style><body><h1>BookReader</h1><p>スマホ/PCからPDFをアップロードすると、同じアカウントでQuest 3から読めます。</p><section id="auth"><input id="email" placeholder="Email"><input id="password" type="password" placeholder="Password (6+ chars)"><div class="row"><button onclick="login(false)">Login</button><button onclick="login(true)">Create account</button></div></section><section id="library" hidden><input id="title" placeholder="Title (optional)"><input id="pdf" type="file" accept="application/pdf"><button onclick="upload()">Upload PDF</button><button onclick="loadBooks()">Refresh</button><ul id="books"></ul></section><pre id="msg"></pre><script>let token=localStorage.getItem('token');const msg=t=>document.querySelector('#msg').textContent=t;async function login(reg){const r=await fetch(reg?'/api/register':'/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email.value,password:password.value})});const j=await r.json();if(!r.ok)return msg(j.error);token=j.token;localStorage.setItem('token',token);show();}function show(){auth.hidden=!!token;library.hidden=!token;if(token)loadBooks()}async function loadBooks(){const r=await fetch('/api/books',{headers:{Authorization:'Bearer '+token}});if(r.status===401){localStorage.removeItem('token');token=null;return show()}const a=await r.json();books.innerHTML=a.map(b=>`<li><b>${esc(b.title)}</b><br><small>${esc(b.fileName)} / last page: ${b.lastPage+1}</small></li>`).join('')}async function upload(){const f=pdf.files[0];if(!f)return msg('PDFを選択してください');const fd=new FormData();fd.append('pdf',f);fd.append('title',title.value);const r=await fetch('/api/books',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});const j=await r.json();msg(r.ok?'Uploaded':j.error);if(r.ok){pdf.value='';title.value='';loadBooks()}}const esc=s=>String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));show();</script></body></html>
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#171717">
+  <title>BookReader Library</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#0f0f10;color:#f4f4f4;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:760px;margin:0 auto;padding:28px 18px 56px}h1{margin:0 0 4px;font-size:32px}.sub{margin:0 0 24px;color:#aaa}.card{background:#19191b;border:1px solid #2d2d31;border-radius:18px;padding:18px;margin:14px 0}input,button{font:inherit}input[type=email],input[type=password],input[type=text]{width:100%;padding:13px 14px;margin:6px 0;border-radius:12px;border:1px solid #3b3b41;background:#101012;color:#fff}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}button{padding:12px 14px;border:0;border-radius:12px;background:#f0f0f0;color:#111;font-weight:700;cursor:pointer}button.secondary{background:#2b2b30;color:#eee}button.danger{background:#342126;color:#ffb5be}button:disabled{opacity:.5;cursor:default}.drop{display:flex;min-height:150px;align-items:center;justify-content:center;text-align:center;border:2px dashed #56565e;border-radius:18px;padding:22px;background:#131316;transition:.15s}.drop.active{border-color:#fff;background:#202025}.drop input{display:none}.drop label{cursor:pointer;width:100%}.drop strong{display:block;font-size:18px;margin-bottom:6px}.muted{color:#999;font-size:13px}.book{display:flex;gap:12px;align-items:center;padding:14px 0;border-bottom:1px solid #303034}.book:last-child{border-bottom:0}.book .meta{min-width:0;flex:1}.book b,.book small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.book small{color:#999;margin-top:3px}.book button{flex:0 0 auto;padding:8px 10px;font-size:13px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#173221;color:#93d6a2;font-size:12px}#msg{min-height:24px;white-space:pre-wrap;color:#c9c9c9}.progress{height:7px;background:#29292e;border-radius:999px;overflow:hidden;margin-top:10px}.progress>div{height:100%;width:0;background:#f4f4f4;transition:width .15s}@media(max-width:560px){main{padding-top:20px}.row.stack{flex-direction:column}.row.stack>*{width:100%}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>BookReader</h1>
+  <p class="sub">スマホ/PCでPDFを入れる。Questでは本を選ぶだけ。</p>
+
+  <section id="auth" class="card">
+    <input id="email" type="email" autocomplete="email" placeholder="Email">
+    <input id="password" type="password" autocomplete="current-password" placeholder="Password (6+ chars)">
+    <div class="row stack">
+      <button onclick="login(false)">Login</button>
+      <button class="secondary" onclick="login(true)">Create account</button>
+    </div>
+  </section>
+
+  <section id="library" hidden>
+    <div class="card">
+      <div class="topbar">
+        <div><b>Cloud Library</b><br><span class="pill">Questへ自動同期</span></div>
+        <button class="secondary" onclick="logout()">Logout</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <input id="title" type="text" placeholder="タイトル（1冊だけ選ぶ場合・省略可）">
+      <div id="drop" class="drop">
+        <label for="pdf">
+          <strong>PDFを選ぶ / ここへドロップ</strong>
+          <span class="muted">複数PDFをまとめてアップロードできます（1冊 最大200MB）</span>
+        </label>
+        <input id="pdf" type="file" accept="application/pdf,.pdf" multiple>
+      </div>
+      <button id="uploadButton" style="width:100%;margin-top:12px" onclick="uploadSelected()">Upload PDF</button>
+      <div class="progress" id="progress" hidden><div id="progressBar"></div></div>
+    </div>
+
+    <div class="card">
+      <div class="topbar"><b>Books</b><button class="secondary" onclick="loadBooks()">Refresh</button></div>
+      <div id="books"><p class="muted">Loading…</p></div>
+    </div>
+  </section>
+
+  <div id="msg"></div>
+</main>
+<script>
+let token=localStorage.getItem('bookreaderToken');
+let pollTimer=null;
+const $=id=>document.getElementById(id);
+const msg=text=>{$('msg').textContent=text||''};
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+
+async function request(path,options={}){
+  const headers=new Headers(options.headers||{});
+  if(token)headers.set('Authorization','Bearer '+token);
+  const response=await fetch(path,{...options,headers});
+  if(response.status===401){logout(false);throw new Error('ログインの有効期限が切れました');}
+  return response;
+}
+
+async function login(register){
+  msg('');
+  const response=await fetch(register?'/api/register':'/api/login',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({email:$('email').value,password:$('password').value})
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok){msg(data.error||'Login failed');return;}
+  token=data.token;
+  localStorage.setItem('bookreaderToken',token);
+  $('password').value='';
+  show();
+}
+
+function logout(showMessage=true){
+  token=null;
+  localStorage.removeItem('bookreaderToken');
+  if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+  $('auth').hidden=false;
+  $('library').hidden=true;
+  if(showMessage)msg('ログアウトしました');
+}
+
+function show(){
+  $('auth').hidden=!!token;
+  $('library').hidden=!token;
+  if(!token)return;
+  loadBooks();
+  if(pollTimer)clearInterval(pollTimer);
+  pollTimer=setInterval(loadBooks,5000);
+}
+
+async function loadBooks(){
+  if(!token)return;
+  try{
+    const response=await request('/api/books');
+    const list=await response.json();
+    if(!response.ok)throw new Error(list.error||'Library request failed');
+    $('books').innerHTML=list.length?list.map(book=>`
+      <div class="book">
+        <div class="meta">
+          <b>${esc(book.title)}</b>
+          <small>${esc(book.fileName)} · 続き ${Number(book.lastPage||0)+1}ページ</small>
+        </div>
+        <button class="danger" onclick="removeBook('${book.id}')">削除</button>
+      </div>`).join(''):'<p class="muted">まだPDFがありません。上から追加してください。</p>';
+  }catch(error){msg(error.message);}
+}
+
+async function uploadSelected(){
+  const files=[...$('pdf').files];
+  if(!files.length){msg('PDFを選択してください');return;}
+  await uploadFiles(files);
+}
+
+async function uploadFiles(files){
+  $('uploadButton').disabled=true;
+  $('progress').hidden=false;
+  msg('');
+  let completed=0;
+  try{
+    for(const file of files){
+      if(!file.name.toLowerCase().endsWith('.pdf'))throw new Error(`${file.name} はPDFではありません`);
+      const form=new FormData();
+      form.append('pdf',file);
+      if(files.length===1&&$('title').value.trim())form.append('title',$('title').value.trim());
+      msg(`${completed+1}/${files.length}  ${file.name} をアップロード中…`);
+      const response=await request('/api/books',{method:'POST',body:form});
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(data.error||`${file.name} のアップロードに失敗しました`);
+      completed++;
+      $('progressBar').style.width=Math.round(completed/files.length*100)+'%';
+    }
+    $('pdf').value='';
+    $('title').value='';
+    msg(`${completed}冊をアップロードしました。Questの本棚へ自動同期されます。`);
+    await loadBooks();
+  }catch(error){msg(error.message);}
+  finally{
+    $('uploadButton').disabled=false;
+    setTimeout(()=>{$('progress').hidden=true;$('progressBar').style.width='0'},700);
+  }
+}
+
+async function removeBook(id){
+  if(!confirm('このPDFをクラウド本棚から削除しますか？'))return;
+  try{
+    const response=await request('/api/books/'+encodeURIComponent(id),{method:'DELETE'});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok)throw new Error(data.error||'削除に失敗しました');
+    msg('削除しました');
+    await loadBooks();
+  }catch(error){msg(error.message);}
+}
+
+const drop=$('drop');
+['dragenter','dragover'].forEach(name=>drop.addEventListener(name,event=>{event.preventDefault();drop.classList.add('active')}));
+['dragleave','drop'].forEach(name=>drop.addEventListener(name,event=>{event.preventDefault();drop.classList.remove('active')}));
+drop.addEventListener('drop',event=>{const files=[...event.dataTransfer.files].filter(file=>file.name.toLowerCase().endsWith('.pdf'));if(files.length)uploadFiles(files)});
+$('pdf').addEventListener('change',()=>{const count=$('pdf').files.length;if(count)msg(`${count}冊選択中`)});
+show();
+</script>
+</body>
+</html>
