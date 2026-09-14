@@ -4,6 +4,11 @@ import path from 'node:path';
 const read = p => fs.readFileSync(p);
 const write = (p,b) => { fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,b); };
 
+async function errorDetail(response) {
+  const text = await response.text().catch(() => '');
+  return text ? `: ${text.slice(0, 500)}` : '';
+}
+
 export class PersistentStore {
   constructor({ root, proxyUrl, proxySecret }) {
     this.root = root;
@@ -29,7 +34,7 @@ export class PersistentStore {
   async ensureBucket() {
     if (!this.remote) return;
     const r = await fetch(this.objectUrl(), { headers:this.headers() });
-    if (!r.ok) throw new Error(`Persistent storage init failed (${r.status})`);
+    if (!r.ok) throw new Error(`Persistent storage init failed (${r.status})${await errorDetail(r)}`);
   }
 
   async putObject(objectPath, bytes, contentType='application/octet-stream') {
@@ -42,7 +47,7 @@ export class PersistentStore {
       headers:this.headers({'Content-Type':contentType}),
       body:bytes,
     });
-    if (!r.ok) throw new Error(`Persistent upload failed (${r.status})`);
+    if (!r.ok) throw new Error(`Persistent upload failed (${r.status})${await errorDetail(r)}`);
   }
 
   async getObject(objectPath) {
@@ -52,7 +57,7 @@ export class PersistentStore {
     }
     const r = await fetch(this.objectUrl(objectPath), { headers:this.headers() });
     if (r.status===404) return null;
-    if (!r.ok) throw new Error(`Persistent download failed (${r.status})`);
+    if (!r.ok) throw new Error(`Persistent download failed (${r.status})${await errorDetail(r)}`);
     return Buffer.from(await r.arrayBuffer());
   }
 
@@ -66,7 +71,7 @@ export class PersistentStore {
       method:'DELETE',
       headers:this.headers(),
     });
-    if(!r.ok) throw new Error(`Persistent delete failed (${r.status})`);
+    if(!r.ok) throw new Error(`Persistent delete failed (${r.status})${await errorDetail(r)}`);
   }
 
   async restoreDatabase(dbPath) {
