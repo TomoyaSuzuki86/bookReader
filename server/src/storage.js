@@ -23,6 +23,10 @@ export class PersistentStore {
     return `${this.supabaseUrl}/storage/v1/${mode}/${encodeURIComponent(this.bucket)}/${encoded}`;
   }
 
+  localPath(objectPath) {
+    return path.join(this.root, objectPath);
+  }
+
   async ensureBucket() {
     if (!this.remote) return;
     const r = await fetch(`${this.supabaseUrl}/storage/v1/bucket/${encodeURIComponent(this.bucket)}`, { headers:this.headers() });
@@ -37,7 +41,7 @@ export class PersistentStore {
 
   async putObject(objectPath, bytes, contentType='application/octet-stream') {
     if (!this.remote) {
-      write(path.join(this.root,'objects',objectPath),bytes);
+      write(this.localPath(objectPath),bytes);
       return;
     }
     const r = await fetch(this.objectUrl(objectPath), {
@@ -50,7 +54,7 @@ export class PersistentStore {
 
   async getObject(objectPath) {
     if (!this.remote) {
-      const p=path.join(this.root,'objects',objectPath);
+      const p=this.localPath(objectPath);
       return fs.existsSync(p)?read(p):null;
     }
     const r = await fetch(this.objectUrl(objectPath, true), { headers:this.headers() });
@@ -61,7 +65,7 @@ export class PersistentStore {
 
   async deleteObject(objectPath) {
     if (!this.remote) {
-      const p=path.join(this.root,'objects',objectPath);
+      const p=this.localPath(objectPath);
       if(fs.existsSync(p)) fs.unlinkSync(p);
       return;
     }
@@ -79,10 +83,5 @@ export class PersistentStore {
     if(!bytes) return false;
     write(dbPath,bytes);
     return true;
-  }
-
-  async backupDatabase(dbPath) {
-    if (!this.remote || !fs.existsSync(dbPath)) return;
-    await this.putObject('_system/bookreader.db',read(dbPath),'application/x-sqlite3');
   }
 }
