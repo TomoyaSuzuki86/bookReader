@@ -78,7 +78,7 @@ export class PersistentStore {
   }
 
   async restoreDatabase(dbPath) {
-    if (!this.remote || fs.existsSync(dbPath)) return false;
+    if (!this.remote) return false;
     const bytes=await this.getObject('_system/bookreader.db');
     if(!bytes) return false;
     write(dbPath,bytes);
