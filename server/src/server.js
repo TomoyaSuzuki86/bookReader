@@ -18,9 +18,8 @@ fs.mkdirSync(tmpDir, { recursive: true });
 
 const store = new PersistentStore({
   root,
-  supabaseUrl: process.env.SUPABASE_URL,
-  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
-  bucket: process.env.SUPABASE_BUCKET || 'bookreader',
+  proxyUrl: process.env.PERSIST_PROXY_URL,
+  proxySecret: process.env.PERSIST_PROXY_SECRET,
 });
 await store.ensureBucket();
 const restored = await store.restoreDatabase(dbPath);
