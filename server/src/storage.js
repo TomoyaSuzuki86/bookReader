@@ -5,38 +5,31 @@ const read = p => fs.readFileSync(p);
 const write = (p,b) => { fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,b); };
 
 export class PersistentStore {
-  constructor({ root, supabaseUrl, serviceRoleKey, bucket = 'bookreader' }) {
+  constructor({ root, proxyUrl, proxySecret }) {
     this.root = root;
-    this.supabaseUrl = (supabaseUrl || '').replace(/\/$/,'');
-    this.key = serviceRoleKey || '';
-    this.bucket = bucket;
-    this.remote = Boolean(this.supabaseUrl && this.key);
-  }
-
-  headers(extra={}) {
-    return { Authorization:`Bearer ${this.key}`, apikey:this.key, ...extra };
-  }
-
-  objectUrl(objectPath, authenticated = false) {
-    const mode = authenticated ? 'object/authenticated' : 'object';
-    const encoded = objectPath.split('/').map(encodeURIComponent).join('/');
-    return `${this.supabaseUrl}/storage/v1/${mode}/${encodeURIComponent(this.bucket)}/${encoded}`;
+    this.proxyUrl = (proxyUrl || '').replace(/\/$/,'');
+    this.proxySecret = proxySecret || '';
+    this.remote = Boolean(this.proxyUrl && this.proxySecret);
   }
 
   localPath(objectPath) {
     return path.join(this.root, objectPath);
   }
 
+  headers(extra={}) {
+    return { 'x-bookreader-secret': this.proxySecret, ...extra };
+  }
+
+  objectUrl(objectPath) {
+    const url = new URL(this.proxyUrl);
+    if (objectPath) url.searchParams.set('path', objectPath);
+    return url.toString();
+  }
+
   async ensureBucket() {
     if (!this.remote) return;
-    const r = await fetch(`${this.supabaseUrl}/storage/v1/bucket/${encodeURIComponent(this.bucket)}`, { headers:this.headers() });
-    if (r.ok) return;
-    const c = await fetch(`${this.supabaseUrl}/storage/v1/bucket`, {
-      method:'POST',
-      headers:this.headers({'Content-Type':'application/json'}),
-      body:JSON.stringify({ id:this.bucket, name:this.bucket, public:false, file_size_limit:209715200 }),
-    });
-    if (!c.ok && c.status !== 409) throw new Error(`Storage bucket init failed (${c.status})`);
+    const r = await fetch(this.objectUrl(), { headers:this.headers() });
+    if (!r.ok) throw new Error(`Persistent storage init failed (${r.status})`);
   }
 
   async putObject(objectPath, bytes, contentType='application/octet-stream') {
@@ -45,8 +38,8 @@ export class PersistentStore {
       return;
     }
     const r = await fetch(this.objectUrl(objectPath), {
-      method:'POST',
-      headers:this.headers({'Content-Type':contentType,'x-upsert':'true'}),
+      method:'PUT',
+      headers:this.headers({'Content-Type':contentType}),
       body:bytes,
     });
     if (!r.ok) throw new Error(`Persistent upload failed (${r.status})`);
@@ -57,7 +50,7 @@ export class PersistentStore {
       const p=this.localPath(objectPath);
       return fs.existsSync(p)?read(p):null;
     }
-    const r = await fetch(this.objectUrl(objectPath, true), { headers:this.headers() });
+    const r = await fetch(this.objectUrl(objectPath), { headers:this.headers() });
     if (r.status===404) return null;
     if (!r.ok) throw new Error(`Persistent download failed (${r.status})`);
     return Buffer.from(await r.arrayBuffer());
@@ -69,10 +62,9 @@ export class PersistentStore {
       if(fs.existsSync(p)) fs.unlinkSync(p);
       return;
     }
-    const r=await fetch(`${this.supabaseUrl}/storage/v1/object/${encodeURIComponent(this.bucket)}`, {
+    const r=await fetch(this.objectUrl(objectPath), {
       method:'DELETE',
-      headers:this.headers({'Content-Type':'application/json'}),
-      body:JSON.stringify({ prefixes:[objectPath] }),
+      headers:this.headers(),
     });
     if(!r.ok) throw new Error(`Persistent delete failed (${r.status})`);
   }
