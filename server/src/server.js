@@ -14,6 +14,7 @@ const root = path.resolve(process.env.DATA_DIR || './data');
 const secret = process.env.JWT_SECRET || 'development-only-change-me';
 const tmpDir = path.join(root, 'tmp');
 const dbPath = path.join(root, 'bookreader.db');
+const maxPdfBytes = 50 * 1024 * 1024;
 fs.mkdirSync(tmpDir, { recursive: true });
 
 const store = new PersistentStore({
@@ -83,7 +84,7 @@ app.use(express.static('public'));
 
 const upload = multer({
   dest: tmpDir,
-  limits: { fileSize: 200 * 1024 * 1024 },
+  limits: { fileSize: maxPdfBytes },
 });
 
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -191,11 +192,12 @@ app.delete('/api/books/:id', auth, asyncRoute(async (req, res) => {
 app.get('/health', (_, res) => res.json({
   ok: true,
   persistence: store.remote ? 'durable-object-storage' : 'local-filesystem',
+  maxPdfBytes,
 }));
 
 app.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
-    return res.status(413).json({ error: 'PDF is too large (max 200 MB)' });
+    return res.status(413).json({ error: 'PDF is too large (max 50 MB)' });
   }
   console.error(err);
   res.status(500).json({ error: 'Server error' });
