@@ -177,6 +177,10 @@ class ReaderController(context: Context) {
         spreadStart = 0,
         leftBitmap = null,
         rightBitmap = null,
+        previousRightBitmap = null,
+        previousLeftBitmap = null,
+        nextRightBitmap = null,
+        nextLeftBitmap = null,
       )
     }
     onMain { onReadingChanged?.invoke(false) }
@@ -204,8 +208,12 @@ class ReaderController(context: Context) {
 
   private fun renderSpread(start: Int, token: String?, book: BookSummary, serverUrl: String) {
     val activeRenderer = renderer ?: return
+    val previousRight = activeRenderer.render(start - 2)
+    val previousLeft = activeRenderer.render(start - 1)
     val right = activeRenderer.render(start)
     val left = activeRenderer.render(start + 1)
+    val nextRight = activeRenderer.render(start + 2)
+    val nextLeft = activeRenderer.render(start + 3)
     val updatedBook = book.copy(lastPage = start)
     update {
       it.copy(
@@ -213,6 +221,10 @@ class ReaderController(context: Context) {
         spreadStart = start,
         rightBitmap = right,
         leftBitmap = left,
+        previousRightBitmap = previousRight,
+        previousLeftBitmap = previousLeft,
+        nextRightBitmap = nextRight,
+        nextLeftBitmap = nextLeft,
         loading = false,
         error = null,
         books = it.books.map { existing -> if (existing.id == book.id) updatedBook else existing },
