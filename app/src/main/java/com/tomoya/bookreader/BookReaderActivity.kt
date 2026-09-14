@@ -17,8 +17,7 @@ class BookReaderActivity : AppSystemActivity() {
   private lateinit var controller: ReaderController
   private lateinit var libraryEntity: Entity
   private lateinit var bookEntity: Entity
-  private lateinit var leftPageEntity: Entity
-  private lateinit var rightPageEntity: Entity
+  private lateinit var spreadEntity: Entity
   private lateinit var toolbarEntity: Entity
 
   override fun registerFeatures(): List<SpatialFeature> = listOf(VRFeature(this), ComposeFeature())
@@ -45,15 +44,13 @@ class BookReaderActivity : AppSystemActivity() {
       )
     )
 
-    leftPageEntity = bookChild(R.id.left_page_panel, 0.305f, 0f, -0.04f, -4f)
-    rightPageEntity = bookChild(R.id.right_page_panel, -0.305f, 0f, -0.04f, 4f)
+    spreadEntity = bookChild(R.id.spread_panel, 0f, 0f, -0.045f, 0f)
     toolbarEntity = bookChild(R.id.toolbar_panel, 0f, -0.56f, -0.10f, 0f)
 
     controller.onReadingChanged = { reading ->
       libraryEntity.setComponent(Visible(!reading))
       bookEntity.setComponent(Visible(reading))
-      leftPageEntity.setComponent(Visible(reading))
-      rightPageEntity.setComponent(Visible(reading))
+      spreadEntity.setComponent(Visible(reading))
       toolbarEntity.setComponent(Visible(reading))
     }
   }
@@ -85,8 +82,7 @@ class BookReaderActivity : AppSystemActivity() {
   override fun registerPanels(): List<PanelRegistration> = listOf(
     composePanel(R.id.library_panel, 1.02f, 0.74f) { LibraryPanel(controller) },
     composePanel(R.id.book_back_panel, 1.26f, 0.90f) { BookBackPanel() },
-    composePanel(R.id.left_page_panel, 0.58f, 0.82f) { PagePanel(controller, true) },
-    composePanel(R.id.right_page_panel, 0.58f, 0.82f) { PagePanel(controller, false) },
+    composePanel(R.id.spread_panel, 1.16f, 0.82f) { BookSpreadPanel(controller) },
     composePanel(R.id.toolbar_panel, 1.18f, 0.19f) { ReaderToolbar(controller) },
   )
 

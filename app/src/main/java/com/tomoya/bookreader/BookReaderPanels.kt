@@ -1,7 +1,9 @@
 package com.tomoya.bookreader
 
+import android.graphics.Bitmap
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -23,11 +25,16 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 @Composable
 fun LibraryPanel(controller: ReaderController) {
@@ -108,7 +115,7 @@ fun BookBackPanel() {
   Box(Modifier.fillMaxSize().background(Color(0xFF2B211C))) {
     Box(
       Modifier
-        .width(12.dp)
+        .width(14.dp)
         .fillMaxHeight()
         .align(Alignment.Center)
         .background(Color(0xFF17110E))
@@ -117,94 +124,58 @@ fun BookBackPanel() {
 }
 
 @Composable
-fun PagePanel(controller: ReaderController, left: Boolean) {
+fun BookSpreadPanel(controller: ReaderController) {
   val state by controller.state
   val scope = rememberCoroutineScope()
   val density = LocalDensity.current
-  val cameraDistancePx = with(density) { 42.dp.toPx() }
-  val maxShadowPx = with(density) { 14.dp.toPx() }
+  val cameraDistancePx = with(density) { 54.dp.toPx() }
 
-  var dragPx by remember { mutableFloatStateOf(0f) }
   var widthPx by remember { mutableFloatStateOf(1f) }
+  var dragPx by remember { mutableFloatStateOf(0f) }
+  var direction by remember { mutableIntStateOf(0) } // +1 next, -1 previous
   var turnProgress by remember { mutableFloatStateOf(0f) }
-  var direction by remember { mutableIntStateOf(0) }
   var settling by remember { mutableStateOf(false) }
   var awaitingPageChange by remember { mutableStateOf(false) }
 
-  val bitmap = if (left) state.leftBitmap else state.rightBitmap
-  val pageNumber = if (left) state.leftPageNumber else state.rightPageNumber
-
   LaunchedEffect(state.spreadStart) {
     if (awaitingPageChange) {
-      turnProgress = 0f
       dragPx = 0f
       direction = 0
+      turnProgress = 0f
       settling = false
       awaitingPageChange = false
     }
   }
 
-  fun cancelTurn() {
-    if (settling) return
-    settling = true
-    scope.launch {
-      val anim = Animatable(turnProgress)
-      anim.animateTo(0f, tween(140)) { turnProgress = value }
-      dragPx = 0f
-      direction = 0
-      settling = false
-    }
-  }
-
-  fun finishTurn() {
+  fun settle(commit: Boolean) {
     if (settling) return
     val dir = direction
-    val allowed = if (dir > 0) state.canGoNext else if (dir < 0) state.canGoPrevious else false
-    val commit = allowed && turnProgress >= 0.28f
     settling = true
     scope.launch {
       val anim = Animatable(turnProgress)
-      anim.animateTo(if (commit) 1f else 0f, tween(if (commit) 180 else 140)) { turnProgress = value }
+      anim.animateTo(if (commit) 1f else 0f, tween(if (commit) 240 else 150)) {
+        turnProgress = value
+      }
       if (!commit) {
         dragPx = 0f
         direction = 0
         settling = false
         return@launch
       }
-
       awaitingPageChange = true
       if (dir > 0) controller.nextSpread() else controller.previousSpread()
-
-      // Rendering normally completes far sooner. This only prevents the page from remaining edge-on after a network/render error.
       delay(1800)
       if (awaitingPageChange) {
-        turnProgress = 0f
         dragPx = 0f
         direction = 0
+        turnProgress = 0f
         settling = false
         awaitingPageChange = false
       }
     }
   }
 
-  val turnAngle = when {
-    direction > 0 -> -86f * turnProgress
-    direction < 0 -> 86f * turnProgress
-    else -> 0f
-  }
-  val hinge = when {
-    direction > 0 -> TransformOrigin(1f, 0.5f)
-    direction < 0 -> TransformOrigin(0f, 0.5f)
-    else -> TransformOrigin.Center
-  }
-  val shadowAlpha = 0.06f + 0.34f * turnProgress
-  val shadowBrush = if (direction >= 0) {
-    Brush.horizontalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = shadowAlpha)))
-  } else {
-    Brush.horizontalGradient(listOf(Color.Black.copy(alpha = shadowAlpha), Color.Transparent))
-  }
-
-  Box(
+  BoxWithConstraints(
     Modifier
       .fillMaxSize()
       .onSizeChanged { widthPx = it.width.coerceAtLeast(1).toFloat() }
@@ -222,55 +193,203 @@ fun PagePanel(controller: ReaderController, left: Boolean) {
             if (!settling) {
               dragPx += amount
               direction = if (dragPx >= 0f) 1 else -1
-              val rawProgress = (abs(dragPx) / widthPx).coerceIn(0f, 0.96f)
               val allowed = if (direction > 0) state.canGoNext else state.canGoPrevious
-              turnProgress = if (allowed) rawProgress else rawProgress * 0.12f
+              val raw = (abs(dragPx) / (widthPx * 0.52f)).coerceIn(0f, 0.98f)
+              turnProgress = if (allowed) raw else raw * 0.10f
             }
           },
-          onDragEnd = { finishTurn() },
-          onDragCancel = { cancelTurn() },
+          onDragEnd = {
+            val allowed = if (direction > 0) state.canGoNext else if (direction < 0) state.canGoPrevious else false
+            settle(allowed && turnProgress >= 0.22f)
+          },
+          onDragCancel = { settle(false) },
         )
       },
     contentAlignment = Alignment.Center,
+  ) {
+    val halfWidth = maxWidth / 2
+    val turningNext = direction > 0 && turnProgress > 0f
+    val turningPrevious = direction < 0 && turnProgress > 0f
+
+    val visibleLeft = if (turningNext) state.nextLeftBitmap ?: state.leftBitmap else state.leftBitmap
+    val visibleRight = if (turningPrevious) state.previousRightBitmap ?: state.rightBitmap else state.rightBitmap
+    val leftNumber = if (turningNext && state.nextLeftBitmap != null) state.spreadStart + 4 else state.leftPageNumber
+    val rightNumber = if (turningPrevious && state.previousRightBitmap != null) state.spreadStart - 1 else state.rightPageNumber
+
+    StaticPage(
+      bitmap = visibleLeft,
+      pageNumber = leftNumber,
+      modifier = Modifier.width(halfWidth).fillMaxHeight().align(Alignment.CenterStart),
+    )
+    StaticPage(
+      bitmap = visibleRight,
+      pageNumber = rightNumber,
+      modifier = Modifier.width(halfWidth).fillMaxHeight().align(Alignment.CenterEnd),
+    )
+
+    Box(
+      Modifier
+        .width(10.dp)
+        .fillMaxHeight()
+        .align(Alignment.Center)
+        .background(
+          Brush.horizontalGradient(
+            listOf(Color.Black.copy(alpha = 0.17f), Color.Transparent, Color.Black.copy(alpha = 0.14f))
+          )
+        )
+    )
+
+    if (turningNext) {
+      CurlingPage(
+        front = state.leftBitmap,
+        back = state.nextRightBitmap,
+        progress = turnProgress,
+        next = true,
+        cameraDistancePx = cameraDistancePx,
+        modifier = Modifier.width(halfWidth).fillMaxHeight().align(Alignment.CenterStart),
+      )
+    } else if (turningPrevious) {
+      CurlingPage(
+        front = state.rightBitmap,
+        back = state.previousLeftBitmap,
+        progress = turnProgress,
+        next = false,
+        cameraDistancePx = cameraDistancePx,
+        modifier = Modifier.width(halfWidth).fillMaxHeight().align(Alignment.CenterEnd),
+      )
+    }
+  }
+}
+
+@Composable
+private fun StaticPage(bitmap: Bitmap?, pageNumber: Int, modifier: Modifier = Modifier) {
+  Box(modifier.background(Color(0xFFFEFDF9)), contentAlignment = Alignment.Center) {
+    if (bitmap != null) {
+      Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+    }
+    if (pageNumber > 0) {
+      Text(
+        pageNumber.toString(),
+        color = Color(0xFF77736D),
+        fontSize = 10.sp,
+        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 7.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun CurlingPage(
+  front: Bitmap?,
+  back: Bitmap?,
+  progress: Float,
+  next: Boolean,
+  cameraDistancePx: Float,
+  modifier: Modifier = Modifier,
+) {
+  val showBack = progress > 0.5f
+  val pageBitmap = if (showBack) back else front
+  val globalAngle = (if (next) -180f else 180f) * progress
+  val wave = sin(Math.PI * progress.toDouble()).toFloat().coerceAtLeast(0f)
+  val hinge = if (next) TransformOrigin(1f, 0.5f) else TransformOrigin(0f, 0.5f)
+
+  Box(
+    modifier.graphicsLayer {
+      transformOrigin = hinge
+      rotationY = globalAngle
+      cameraDistance = cameraDistancePx
+      shadowElevation = 12f * wave
+      clip = false
+    }
   ) {
     Box(
       Modifier
         .fillMaxSize()
         .graphicsLayer {
-          transformOrigin = hinge
-          rotationY = turnAngle
+          if (showBack) rotationY = 180f
           cameraDistance = cameraDistancePx
-          shadowElevation = maxShadowPx * turnProgress
+          clip = false
         }
-        .background(Color(0xFFFEFDF9))
     ) {
-      if (bitmap != null) {
-        Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-      } else if (state.isReading) {
-        CircularProgressIndicator(Modifier.align(Alignment.Center))
-      }
+      SegmentedPaper(
+        bitmap = pageBitmap,
+        progress = progress,
+        next = next,
+        cameraDistancePx = cameraDistancePx,
+      )
 
-      if (direction != 0 && turnProgress > 0f) {
-        Box(
-          Modifier
-            .fillMaxHeight()
-            .width((18f + 46f * turnProgress).dp)
-            .align(if (direction > 0) Alignment.CenterEnd else Alignment.CenterStart)
-            .background(shadowBrush)
-        )
-      }
+      val foldAlpha = 0.08f + 0.30f * wave
+      Box(
+        Modifier
+          .fillMaxHeight()
+          .width((18f + 34f * wave).dp)
+          .align(if (next) Alignment.CenterEnd else Alignment.CenterStart)
+          .background(
+            if (next) {
+              Brush.horizontalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = foldAlpha)))
+            } else {
+              Brush.horizontalGradient(listOf(Color.Black.copy(alpha = foldAlpha), Color.Transparent))
+            }
+          )
+      )
+    }
+  }
+}
 
-      if (pageNumber > 0) {
-        Text(
-          pageNumber.toString(),
-          color = Color(0xFF77736D),
-          fontSize = 10.sp,
-          modifier = Modifier
-            .align(Alignment.BottomCenter)
-            .padding(bottom = 7.dp),
-        )
+@Composable
+private fun SegmentedPaper(
+  bitmap: Bitmap?,
+  progress: Float,
+  next: Boolean,
+  cameraDistancePx: Float,
+) {
+  val segmentCount = 24
+  val wave = sin(Math.PI * progress.toDouble()).toFloat().coerceAtLeast(0f)
+  Row(Modifier.fillMaxSize()) {
+    repeat(segmentCount) { index ->
+      val fromHinge = if (next) {
+        (segmentCount - 1 - index).toFloat() / (segmentCount - 1).toFloat()
+      } else {
+        index.toFloat() / (segmentCount - 1).toFloat()
+      }
+      val localAngle = (if (next) -1f else 1f) * 38f * wave * fromHinge * fromHinge
+      Box(
+        Modifier
+          .weight(1f)
+          .fillMaxHeight()
+          .graphicsLayer {
+            transformOrigin = if (next) TransformOrigin(1f, 0.5f) else TransformOrigin(0f, 0.5f)
+            rotationY = localAngle
+            cameraDistance = cameraDistancePx
+            scaleX = 1.025f
+            shadowElevation = 5f * wave * fromHinge
+            clip = true
+          }
+          .background(Color(0xFFFEFDF9))
+      ) {
+        PageStrip(bitmap = bitmap, index = index, count = segmentCount)
       }
     }
+  }
+}
+
+@Composable
+private fun PageStrip(bitmap: Bitmap?, index: Int, count: Int) {
+  if (bitmap == null) return
+  val image = remember(bitmap) { bitmap.asImageBitmap() }
+  Canvas(Modifier.fillMaxSize()) {
+    val fullWidth = size.width * count
+    val scale = min(fullWidth / bitmap.width.toFloat(), size.height / bitmap.height.toFloat())
+    val dstWidth = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
+    val dstHeight = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
+    val imageLeft = ((fullWidth - dstWidth) / 2f).roundToInt()
+    val imageTop = ((size.height - dstHeight) / 2f).roundToInt()
+    val stripGlobalX = (index * size.width).roundToInt()
+    drawImage(
+      image = image,
+      dstOffset = IntOffset(imageLeft - stripGlobalX, imageTop),
+      dstSize = IntSize(dstWidth, dstHeight),
+    )
   }
 }
 

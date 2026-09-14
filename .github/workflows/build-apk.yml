@@ -11,6 +11,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Smoke-test BookReader server
+        run: |
+          cd server
+          npm install --omit=dev
+          DATA_DIR=/tmp/bookreader-ci JWT_SECRET=ci-only PORT=8788 node src/server.js &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          sleep 2
+          curl --fail --silent http://127.0.0.1:8788/health
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

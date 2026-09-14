@@ -24,6 +24,10 @@ data class ReaderUiState(
   val spreadStart: Int = 0,
   val rightBitmap: Bitmap? = null,
   val leftBitmap: Bitmap? = null,
+  val previousRightBitmap: Bitmap? = null,
+  val previousLeftBitmap: Bitmap? = null,
+  val nextRightBitmap: Bitmap? = null,
+  val nextLeftBitmap: Bitmap? = null,
 ) {
   val isReading: Boolean get() = openBook != null
   val rightPageNumber: Int get() = if (pageCount == 0) 0 else spreadStart + 1
