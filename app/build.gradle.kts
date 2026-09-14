@@ -13,8 +13,8 @@ android {
     applicationId = "com.tomoya.bookreader"
     minSdk = 34
     targetSdk = 34
-    versionCode = 1
-    versionName = "0.1.0"
+    versionCode = 2
+    versionName = "0.2.0"
     val serverUrl = providers.gradleProperty("BOOK_SERVER_URL").orElse("https://bookreader.invalid").get()
     buildConfigField("String", "BOOK_SERVER_URL", "\"$serverUrl\"")
   }
