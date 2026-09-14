@@ -11,13 +11,14 @@ const app = express();
 const port = Number(process.env.PORT || 8787);
 const root = path.resolve(process.env.DATA_DIR || './data');
 const secret = process.env.JWT_SECRET || 'development-only-change-me';
-fs.mkdirSync(root, { recursive: true });
+const tmpDir = path.join(root, 'tmp');
+fs.mkdirSync(tmpDir, { recursive: true });
 const db = new Database(path.join(root, 'bookreader.db'));
 db.exec(`CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,title TEXT NOT NULL,file_name TEXT NOT NULL,stored_name TEXT NOT NULL,last_page INTEGER NOT NULL DEFAULT 0,uploaded_at TEXT NOT NULL);`);
 app.use(express.json());
 app.use(express.static('public'));
-const upload = multer({ dest: path.join(root, 'tmp'), limits: { fileSize: 200 * 1024 * 1024 } });
+const upload = multer({ dest: tmpDir, limits: { fileSize: 200 * 1024 * 1024 } });
 
 function tokenFor(user) { return jwt.sign({ sub: user.id, email: user.email }, secret, { expiresIn: '90d' }); }
 function auth(req,res,next) { const raw=req.headers.authorization||''; if(!raw.startsWith('Bearer ')) return res.status(401).json({error:'Unauthorized'}); try { req.user=jwt.verify(raw.slice(7),secret); next(); } catch { res.status(401).json({error:'Invalid token'}); } }

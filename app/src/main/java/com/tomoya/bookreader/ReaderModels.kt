@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 data class BookSummary(val id: String, val title: String, val fileName: String, val lastPage: Int = 0)
 
 data class ReaderUiState(
+  val serverUrl: String = BuildConfig.BOOK_SERVER_URL,
   val token: String? = null,
   val email: String = "",
   val books: List<BookSummary> = emptyList(),

@@ -20,24 +20,27 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun LibraryPanel(controller: ReaderController) {
   val state by controller.state
-  var email by remember { mutableStateOf("") }
+  var serverUrl by remember(state.serverUrl) { mutableStateOf(state.serverUrl) }
+  var email by remember(state.email) { mutableStateOf(state.email) }
   var password by remember { mutableStateOf("") }
   MaterialTheme {
     Surface(Modifier.fillMaxSize(), color = Color(0xEE171717)) {
-      Column(Modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+      Column(Modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("BookReader", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color.White)
         Text("Quest 3 PDF Library", color = Color.LightGray)
         if (state.token == null) {
+          OutlinedTextField(serverUrl, { serverUrl = it }, label = { Text("Server URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
           OutlinedTextField(email, { email = it }, label = { Text("Email") }, singleLine = true, modifier = Modifier.fillMaxWidth())
           OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true, modifier = Modifier.fillMaxWidth())
           Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button({ controller.login(email, password, false) }, enabled = !state.loading) { Text("Login") }
-            OutlinedButton({ controller.login(email, password, true) }, enabled = !state.loading) { Text("Create account") }
+            Button({ controller.login(email, password, serverUrl, false) }, enabled = !state.loading) { Text("Login") }
+            OutlinedButton({ controller.login(email, password, serverUrl, true) }, enabled = !state.loading) { Text("Create account") }
           }
+          Text("本番利用はHTTPSのサーバーURLを指定してください。", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
         } else {
           Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(state.email, color = Color.White)
-            TextButton({ controller.refreshBooks() }) { Text("Refresh") }
+            Column { Text(state.email, color = Color.White); Text(state.serverUrl, color = Color.Gray, style = MaterialTheme.typography.bodySmall) }
+            Row { TextButton({ controller.refreshBooks() }) { Text("Refresh") }; TextButton({ controller.logout() }) { Text("Logout") } }
           }
           LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
             items(state.books) { book ->
@@ -46,7 +49,7 @@ fun LibraryPanel(controller: ReaderController) {
               }
             }
           }
-          Text("PDFの追加はスマホ/PCのWebアップローダーから行います。", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+          Text("PDFの追加はスマホ/PCで同じServer URLを開いて行います。", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
         }
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
