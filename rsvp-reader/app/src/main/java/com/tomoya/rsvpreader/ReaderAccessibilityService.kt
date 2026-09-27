@@ -66,8 +66,12 @@ class ReaderAccessibilityService : AccessibilityService() {
                 return
             }
 
+            val source = intent.getStringExtra(
+                CaptureService.EXTRA_OCR_SOURCE
+            ).orEmpty().ifBlank { "OCR" }
+
             pendingAfterPageTurn = false
-            startPage(text, "OCR")
+            startPage(text, source)
         }
     }
 
@@ -692,7 +696,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         waitingForOcr = true
         pendingAfterPageTurn = afterPageTurn
         mainHandler.removeCallbacks(ocrTimeout)
-        mainHandler.postDelayed(ocrTimeout, 2600)
+        mainHandler.postDelayed(ocrTimeout, 18_000)
 
         runCatching {
             startService(
