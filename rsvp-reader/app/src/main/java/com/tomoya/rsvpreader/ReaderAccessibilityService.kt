@@ -354,7 +354,10 @@ class ReaderAccessibilityService : AccessibilityService() {
         bubble?.visibility = View.GONE
 
         val prefs = getSharedPreferences("reader", Context.MODE_PRIVATE)
-        var speed = prefs.getInt("chars_per_minute", 650).coerceIn(200, 1400)
+        var speed = prefs.getInt(
+            PREF_CHARS_PER_MINUTE_V2,
+            DEFAULT_CHARS_PER_MINUTE
+        ).coerceIn(MIN_CHARS_PER_MINUTE, MAX_CHARS_PER_MINUTE)
         var swipeLeft = prefs.getBoolean(PREF_SWIPE_LEFT, true)
         var index = 0
         var playing = true
@@ -421,7 +424,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             index = index.coerceIn(0, chunks.lastIndex)
             word.text = chunks[index]
             progress.text = "${index + 1} / ${chunks.size}  ·  $source"
-            speedLabel.text = extra ?: "$speed 文字/分  ·  読了時に自動で次ページ"
+            speedLabel.text = extra ?: "$speed 文字/分  ·  1語ずつ  ·  自動ページ送り"
             refreshDirection()
         }
 
@@ -436,15 +439,23 @@ class ReaderAccessibilityService : AccessibilityService() {
             }
 
             val current = chunks[index]
-            val base = (60_000.0 * current.length.coerceAtLeast(2) / speed).toLong()
-            val punctuationBonus = when {
-                current.endsWith('。') || current.endsWith('！') || current.endsWith('？') -> 280L
-                current.endsWith('、') -> 130L
-                else -> 0L
-            }
+            val visibleChars =
+                TextChunker.visibleCharCount(current)
+            val base = (
+                60_000.0 *
+                    visibleChars.toDouble() /
+                    speed.toDouble()
+                ).toLong()
+            val punctuationBonus =
+                TextChunker.sentencePauseMs(current)
+
             mainHandler.postDelayed(
                 tick,
-                (base + punctuationBonus).coerceIn(150L, 1900L)
+                (base + punctuationBonus)
+                    .coerceIn(
+                        MIN_FLASH_MS,
+                        MAX_FLASH_MS
+                    )
             )
         }
 
@@ -478,8 +489,11 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
 
         val slower = control("−") {
-            speed = (speed - 100).coerceAtLeast(200)
-            prefs.edit().putInt("chars_per_minute", speed).apply()
+            speed = (speed - 100)
+                .coerceAtLeast(MIN_CHARS_PER_MINUTE)
+            prefs.edit()
+                .putInt(PREF_CHARS_PER_MINUTE_V2, speed)
+                .apply()
             refreshLabels()
             scheduleNext()
         }
@@ -504,8 +518,11 @@ class ReaderAccessibilityService : AccessibilityService() {
             scheduleNext()
         }
         val faster = control("＋") {
-            speed = (speed + 100).coerceAtMost(1400)
-            prefs.edit().putInt("chars_per_minute", speed).apply()
+            speed = (speed + 100)
+                .coerceAtMost(MAX_CHARS_PER_MINUTE)
+            prefs.edit()
+                .putInt(PREF_CHARS_PER_MINUTE_V2, speed)
+                .apply()
             refreshLabels()
             scheduleNext()
         }
@@ -772,5 +789,13 @@ class ReaderAccessibilityService : AccessibilityService() {
         private const val MIN_TEXT_LENGTH = 18
         private const val PARAGRAPH_MIN_LENGTH = 14
         private const val PREF_SWIPE_LEFT = "page_turn_swipe_left"
+        private const val PREF_CHARS_PER_MINUTE_V2 = "chars_per_minute_v2"
+
+        private const val DEFAULT_CHARS_PER_MINUTE = 1100
+        private const val MIN_CHARS_PER_MINUTE = 400
+        private const val MAX_CHARS_PER_MINUTE = 2400
+
+        private const val MIN_FLASH_MS = 70L
+        private const val MAX_FLASH_MS = 1400L
     }
 }
