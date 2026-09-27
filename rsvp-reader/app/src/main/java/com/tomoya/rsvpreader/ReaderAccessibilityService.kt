@@ -38,6 +38,7 @@ class ReaderAccessibilityService : AccessibilityService() {
     private lateinit var windowManager: WindowManager
 
     private var bubble: TextView? = null
+    private var trashTarget: TextView? = null
     private var readerOverlay: View? = null
     private var receiverRegistered = false
     private var lastPageText = ""
@@ -46,6 +47,17 @@ class ReaderAccessibilityService : AccessibilityService() {
 
     private val ocrReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_SHOW_BUBBLE) {
+                getSharedPreferences(
+                    READER_PREFS,
+                    Context.MODE_PRIVATE
+                ).edit()
+                    .putBoolean(PREF_BUBBLE_HIDDEN, false)
+                    .apply()
+                showFloatingBubble()
+                return
+            }
+
             if (intent?.action != CaptureService.ACTION_OCR_RESULT) return
             if (!waitingForOcr) return
 
@@ -103,7 +115,15 @@ class ReaderAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         registerOcrReceiver()
-        showFloatingBubble()
+
+        val hidden = getSharedPreferences(
+            READER_PREFS,
+            Context.MODE_PRIVATE
+        ).getBoolean(PREF_BUBBLE_HIDDEN, false)
+
+        if (!hidden) {
+            showFloatingBubble()
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -115,6 +135,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         removeReaderOverlay()
         bubble?.let { runCatching { windowManager.removeView(it) } }
         bubble = null
+        hideTrashTarget()
         if (receiverRegistered) {
             runCatching { unregisterReceiver(ocrReceiver) }
             receiverRegistered = false
@@ -124,7 +145,10 @@ class ReaderAccessibilityService : AccessibilityService() {
 
     private fun registerOcrReceiver() {
         if (receiverRegistered) return
-        val filter = IntentFilter(CaptureService.ACTION_OCR_RESULT)
+        val filter = IntentFilter().apply {
+            addAction(CaptureService.ACTION_OCR_RESULT)
+            addAction(ACTION_SHOW_BUBBLE)
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(ocrReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -136,6 +160,14 @@ class ReaderAccessibilityService : AccessibilityService() {
 
     private fun showFloatingBubble() {
         bubble?.let { runCatching { windowManager.removeView(it) } }
+        hideTrashTarget()
+
+        getSharedPreferences(
+            READER_PREFS,
+            Context.MODE_PRIVATE
+        ).edit()
+            .putBoolean(PREF_BUBBLE_HIDDEN, false)
+            .apply()
 
         val size = dp(58)
         val view = TextView(this).apply {
@@ -180,22 +212,135 @@ class ReaderAccessibilityService : AccessibilityService() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downRawX).toInt()
                     val dy = (event.rawY - downRawY).toInt()
-                    if (abs(dx) > dp(5) || abs(dy) > dp(5)) dragged = true
+
+                    if (
+                        abs(dx) > dp(5) ||
+                        abs(dy) > dp(5)
+                    ) {
+                        dragged = true
+                    }
+
                     params.x = max(0, startX - dx)
                     params.y = max(0, startY + dy)
-                    runCatching { windowManager.updateViewLayout(view, params) }
+
+                    runCatching {
+                        windowManager.updateViewLayout(
+                            view,
+                            params
+                        )
+                    }
+
+                    val inTrashZone =
+                        event.rawY >=
+                            resources.displayMetrics.heightPixels *
+                                TRASH_ZONE_START_RATIO
+
+                    showTrashTarget(inTrashZone)
+                    view.alpha =
+                        if (inTrashZone) 0.55f else 0.94f
+
                     true
                 }
+
                 MotionEvent.ACTION_UP -> {
-                    if (!dragged) beginReading()
+                    val shouldHide =
+                        dragged &&
+                            event.rawY >=
+                            resources.displayMetrics.heightPixels *
+                                TRASH_ZONE_START_RATIO
+
+                    hideTrashTarget()
+                    view.alpha = 0.94f
+
+                    if (shouldHide) {
+                        runCatching {
+                            windowManager.removeView(view)
+                        }
+                        bubble = null
+
+                        getSharedPreferences(
+                            READER_PREFS,
+                            Context.MODE_PRIVATE
+                        ).edit()
+                            .putBoolean(
+                                PREF_BUBBLE_HIDDEN,
+                                true
+                            )
+                            .apply()
+
+                        Toast.makeText(
+                            this@ReaderAccessibilityService,
+                            "フローティングボタンを非表示にしました。アプリから再表示できます",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else if (!dragged) {
+                        beginReading()
+                    }
+
                     true
                 }
+
+                MotionEvent.ACTION_CANCEL -> {
+                    hideTrashTarget()
+                    view.alpha = 0.94f
+                    true
+                }
+
                 else -> false
             }
         }
 
         bubble = view
         windowManager.addView(view, params)
+    }
+
+    private fun showTrashTarget(show: Boolean) {
+        if (!show) {
+            hideTrashTarget()
+            return
+        }
+
+        if (trashTarget != null) return
+
+        val target = TextView(this).apply {
+            text = "ここにドロップして非表示"
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setBackgroundColor(
+                Color.argb(225, 30, 32, 38)
+            )
+            setPadding(
+                dp(18),
+                dp(16),
+                dp(18),
+                dp(16)
+            )
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            dp(82),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+        }
+
+        trashTarget = target
+        windowManager.addView(target, params)
+    }
+
+    private fun hideTrashTarget() {
+        trashTarget?.let {
+            runCatching {
+                windowManager.removeView(it)
+            }
+        }
+        trashTarget = null
     }
 
     private fun beginReading() {
@@ -353,11 +498,17 @@ class ReaderAccessibilityService : AccessibilityService() {
         removeReaderOverlay()
         bubble?.visibility = View.GONE
 
-        val prefs = getSharedPreferences("reader", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences(
+            READER_PREFS,
+            Context.MODE_PRIVATE
+        )
         var speed = prefs.getInt(
-            PREF_CHARS_PER_MINUTE_V2,
+            PREF_CHARS_PER_MINUTE_V3,
             DEFAULT_CHARS_PER_MINUTE
-        ).coerceIn(MIN_CHARS_PER_MINUTE, MAX_CHARS_PER_MINUTE)
+        ).coerceIn(
+            MIN_CHARS_PER_MINUTE,
+            MAX_CHARS_PER_MINUTE
+        )
         var swipeLeft = prefs.getBoolean(PREF_SWIPE_LEFT, true)
         var index = 0
         var playing = true
@@ -492,7 +643,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             speed = (speed - 100)
                 .coerceAtLeast(MIN_CHARS_PER_MINUTE)
             prefs.edit()
-                .putInt(PREF_CHARS_PER_MINUTE_V2, speed)
+                .putInt(PREF_CHARS_PER_MINUTE_V3, speed)
                 .apply()
             refreshLabels()
             scheduleNext()
@@ -521,7 +672,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             speed = (speed + 100)
                 .coerceAtMost(MAX_CHARS_PER_MINUTE)
             prefs.edit()
-                .putInt(PREF_CHARS_PER_MINUTE_V2, speed)
+                .putInt(PREF_CHARS_PER_MINUTE_V3, speed)
                 .apply()
             refreshLabels()
             scheduleNext()
@@ -788,14 +939,20 @@ class ReaderAccessibilityService : AccessibilityService() {
     companion object {
         private const val MIN_TEXT_LENGTH = 18
         private const val PARAGRAPH_MIN_LENGTH = 14
-        private const val PREF_SWIPE_LEFT = "page_turn_swipe_left"
-        private const val PREF_CHARS_PER_MINUTE_V2 = "chars_per_minute_v2"
+        const val ACTION_SHOW_BUBBLE =
+            "com.tomoya.rsvpreader.SHOW_BUBBLE"
 
-        private const val DEFAULT_CHARS_PER_MINUTE = 1100
+        private const val READER_PREFS = "reader"
+        private const val PREF_SWIPE_LEFT = "page_turn_swipe_left"
+        private const val PREF_BUBBLE_HIDDEN = "bubble_hidden"
+        private const val PREF_CHARS_PER_MINUTE_V3 = "chars_per_minute_v3"
+
+        private const val DEFAULT_CHARS_PER_MINUTE = 900
         private const val MIN_CHARS_PER_MINUTE = 400
         private const val MAX_CHARS_PER_MINUTE = 2400
 
         private const val MIN_FLASH_MS = 70L
         private const val MAX_FLASH_MS = 1400L
+        private const val TRASH_ZONE_START_RATIO = 0.78f
     }
 }
