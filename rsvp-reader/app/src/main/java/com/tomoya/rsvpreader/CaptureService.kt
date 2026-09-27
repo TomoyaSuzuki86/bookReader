@@ -185,8 +185,12 @@ class CaptureService : Service() {
                 bitmap = prepared,
                 apiKey = apiKey,
                 onSuccess = { text ->
-                    releaseBitmaps(bitmap, prepared)
-                    sendOcrResult(text, "Cloud Vision")
+                    maybeRunGemini(
+                        original = bitmap,
+                        prepared = prepared,
+                        ocrText = text,
+                        source = "Cloud Vision"
+                    )
                 },
                 onFailure = {
                     runMlKit(bitmap, prepared)
@@ -323,6 +327,255 @@ class CaptureService : Service() {
             .orEmpty()
     }
 
+    private fun maybeRunGemini(
+        original: Bitmap,
+        prepared: Bitmap,
+        ocrText: String,
+        source: String
+    ) {
+        val geminiKey = getSharedPreferences(
+            MainActivity.CLOUD_PREFS,
+            MODE_PRIVATE
+        ).getString(
+            MainActivity.PREF_GEMINI_API_KEY,
+            ""
+        ).orEmpty().trim()
+
+        if (geminiKey.isBlank()) {
+            releaseBitmaps(original, prepared)
+            sendOcrResult(ocrText, source)
+            return
+        }
+
+        runGeminiVerification(
+            bitmap = prepared,
+            ocrText = ocrText,
+            apiKey = geminiKey,
+            onSuccess = { corrected ->
+                val useCorrected = isPlausibleCorrection(
+                    original = ocrText,
+                    corrected = corrected
+                )
+                val finalText = if (useCorrected) corrected else ocrText
+                val finalSource = if (useCorrected) {
+                    source + "＋Gemini"
+                } else {
+                    source + "（Gemini補正破棄）"
+                }
+                releaseBitmaps(original, prepared)
+                sendOcrResult(finalText, finalSource)
+            },
+            onFailure = {
+                releaseBitmaps(original, prepared)
+                sendOcrResult(ocrText, source)
+            }
+        )
+    }
+
+    private fun runGeminiVerification(
+        bitmap: Bitmap,
+        ocrText: String,
+        apiKey: String,
+        onSuccess: (String) -> Unit,
+        onFailure: () -> Unit
+    ) {
+        networkExecutor.execute {
+            try {
+                val encoded = encodeJpegBase64(bitmap)
+                val request = JSONObject().apply {
+                    put(
+                        "contents",
+                        JSONArray().put(
+                            JSONObject().apply {
+                                put("role", "user")
+                                put(
+                                    "parts",
+                                    JSONArray()
+                                        .put(
+                                            JSONObject().put(
+                                                "inline_data",
+                                                JSONObject()
+                                                    .put("mime_type", "image/jpeg")
+                                                    .put("data", encoded)
+                                            )
+                                        )
+                                        .put(
+                                            JSONObject().put(
+                                                "text",
+                                                buildGeminiPrompt(ocrText)
+                                            )
+                                        )
+                                )
+                            }
+                        )
+                    )
+                    put(
+                        "generationConfig",
+                        JSONObject()
+                            .put("temperature", 0.0)
+                            .put("maxOutputTokens", 4096)
+                    )
+                }
+
+                val connection = (
+                    URL(
+                        "https://generativelanguage.googleapis.com/v1beta/models/" +
+                            GEMINI_MODEL +
+                            ":generateContent"
+                    ).openConnection() as HttpURLConnection
+                ).apply {
+                    requestMethod = "POST"
+                    connectTimeout = GEMINI_CONNECT_TIMEOUT_MS
+                    readTimeout = GEMINI_READ_TIMEOUT_MS
+                    doOutput = true
+                    setRequestProperty(
+                        "Content-Type",
+                        "application/json; charset=utf-8"
+                    )
+                    setRequestProperty(
+                        "x-goog-api-key",
+                        apiKey
+                    )
+                }
+
+                try {
+                    connection.outputStream.use { stream ->
+                        stream.write(
+                            request.toString()
+                                .toByteArray(StandardCharsets.UTF_8)
+                        )
+                    }
+
+                    val status = connection.responseCode
+                    val responseText = (
+                        if (status in 200..299) {
+                            connection.inputStream
+                        } else {
+                            connection.errorStream
+                        }
+                    )?.bufferedReader()
+                        ?.use { it.readText() }
+                        .orEmpty()
+
+                    if (status !in 200..299) {
+                        throw IllegalStateException(
+                            "Gemini HTTP " + status
+                        )
+                    }
+
+                    val corrected = parseGeminiText(responseText)
+                    if (corrected.isBlank()) {
+                        throw IllegalStateException(
+                            "Gemini returned no text"
+                        )
+                    }
+
+                    mainHandler.post {
+                        onSuccess(
+                            TextChunker.normalizeSource(corrected)
+                        )
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (_: Throwable) {
+                mainHandler.post(onFailure)
+            }
+        }
+    }
+
+    private fun buildGeminiPrompt(ocrText: String): String =
+        "You are a strict OCR verifier for a Japanese ebook page.\n\n" +
+            "Compare the attached screenshot with the OCR candidate below and return ONLY the visible main body text from the screenshot.\n\n" +
+            "Rules:\n" +
+            "- Correct only characters, punctuation, and joins that are visibly wrong in the OCR candidate.\n" +
+            "- Never paraphrase, summarize, translate, simplify, rewrite, or invent text.\n" +
+            "- Never complete text that is cropped or not visible.\n" +
+            "- Ignore app UI, status bars, page controls, progress labels, and buttons.\n" +
+            "- Preserve the original Japanese wording and punctuation exactly when readable.\n" +
+            "- Visual line wrapping is layout only; join wrapped lines naturally.\n" +
+            "- If a character is genuinely unreadable, keep the OCR candidate rather than guessing.\n" +
+            "- Return plain text only. No markdown, no explanation, no quotes.\n\n" +
+            "OCR candidate:\n" + ocrText
+
+    private fun parseGeminiText(responseText: String): String {
+        val root = JSONObject(responseText)
+        val candidates = root.optJSONArray("candidates")
+            ?: return ""
+        val parts = candidates
+            .optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts")
+            ?: return ""
+
+        val output = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val part = parts.optJSONObject(i) ?: continue
+            if (part.optBoolean("thought", false)) continue
+            val text = part.optString("text")
+            if (text.isNotBlank()) {
+                if (output.isNotEmpty()) output.append('\n')
+                output.append(text)
+            }
+        }
+        return output.toString().trim()
+    }
+
+    private fun isPlausibleCorrection(
+        original: String,
+        corrected: String
+    ): Boolean {
+        val a = compactForComparison(original)
+        val b = compactForComparison(corrected)
+        if (a.length < 12 || b.length < 12) return false
+
+        val ratio = b.length.toDouble() / a.length.toDouble()
+        if (ratio !in 0.68..1.32) return false
+
+        return bigramDice(a, b) >= 0.46
+    }
+
+    private fun compactForComparison(text: String): String =
+        TextChunker.normalizeSource(text)
+            .replace(Regex("[\\s　]"), "")
+            .replace(
+                Regex(
+                    "[「」『』（）()【】［］\\[\\]、。！？!?,.:：；;]"
+                ),
+                ""
+            )
+
+    private fun bigramDice(a: String, b: String): Double {
+        if (a.length < 2 || b.length < 2) {
+            return if (a == b) 1.0 else 0.0
+        }
+
+        val aCounts = mutableMapOf<String, Int>()
+        val bCounts = mutableMapOf<String, Int>()
+
+        for (i in 0 until a.length - 1) {
+            val gram = a.substring(i, i + 2)
+            aCounts[gram] = (aCounts[gram] ?: 0) + 1
+        }
+        for (i in 0 until b.length - 1) {
+            val gram = b.substring(i, i + 2)
+            bCounts[gram] = (bCounts[gram] ?: 0) + 1
+        }
+
+        var intersection = 0
+        for ((gram, countA) in aCounts) {
+            val countB = bCounts[gram] ?: 0
+            intersection += minOf(countA, countB)
+        }
+
+        val total = aCounts.values.sum() + bCounts.values.sum()
+        return if (total == 0) {
+            0.0
+        } else {
+            (2.0 * intersection) / total
+        }
+    }
+
     private fun encodeJpegBase64(bitmap: Bitmap): String {
         val output = ByteArrayOutputStream()
         bitmap.compress(
@@ -344,20 +597,26 @@ class CaptureService : Service() {
             InputImage.fromBitmap(prepared, 0)
         )
             .addOnSuccessListener { result ->
-                sendOcrResult(
-                    extractReadingText(
-                        result = result,
-                        imageWidth = prepared.width,
-                        imageHeight = prepared.height
-                    ),
-                    "ML Kit"
+                val text = extractReadingText(
+                    result = result,
+                    imageWidth = prepared.width,
+                    imageHeight = prepared.height
                 )
+                if (text.isBlank()) {
+                    releaseBitmaps(original, prepared)
+                    sendOcrResult(null, "ML Kit")
+                } else {
+                    maybeRunGemini(
+                        original = original,
+                        prepared = prepared,
+                        ocrText = text,
+                        source = "ML Kit"
+                    )
+                }
             }
             .addOnFailureListener {
-                sendOcrResult(null, "ML Kit")
-            }
-            .addOnCompleteListener {
                 releaseBitmaps(original, prepared)
+                sendOcrResult(null, "ML Kit")
             }
     }
 
@@ -511,7 +770,7 @@ class CaptureService : Service() {
                 "RSVP Reader OCR待機中"
             )
             .setContentText(
-                "Cloud Vision優先・ML Kitフォールバック"
+                "Cloud Vision＋Gemini照合・ML Kitフォールバック"
             )
             .setSmallIcon(
                 android.R.drawable.ic_menu_camera
@@ -570,5 +829,8 @@ class CaptureService : Service() {
         private const val CLOUD_JPEG_QUALITY = 88
         private const val CLOUD_CONNECT_TIMEOUT_MS = 8_000
         private const val CLOUD_READ_TIMEOUT_MS = 15_000
+        private const val GEMINI_CONNECT_TIMEOUT_MS = 8_000
+        private const val GEMINI_READ_TIMEOUT_MS = 20_000
+        private const val GEMINI_MODEL = "gemini-3.8-flash"
     }
 }
