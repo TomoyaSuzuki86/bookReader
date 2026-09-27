@@ -117,6 +117,25 @@ class MainActivity : Activity() {
                 startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CAPTURE)
             }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+            bottomMargin = dp(10)
+        })
+
+        root.addView(Button(this).apply {
+            text = "フローティングボタンを再表示"
+            textSize = 14f
+            setOnClickListener {
+                sendBroadcast(
+                    Intent(
+                        ReaderAccessibilityService.ACTION_SHOW_BUBBLE
+                    ).setPackage(packageName)
+                )
+                Toast.makeText(
+                    this@MainActivity,
+                    "フローティングボタンを再表示しました",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply {
             bottomMargin = dp(18)
         })
 
@@ -128,7 +147,7 @@ class MainActivity : Activity() {
         root.addView(status)
 
         root.addView(TextView(this).apply {
-            text = "Cloud Visionが失敗した場合だけ端末内ML Kitへ自動フォールバックします。\nKindleへ戻ると右端に ▶ が表示されます。"
+            text = "Cloud Visionが失敗した場合だけ端末内ML Kitへ自動フォールバックします。\n▶ は画面下へドラッグして非表示にできます。"
             textSize = 14f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
