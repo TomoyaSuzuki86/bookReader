@@ -16,6 +16,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
@@ -23,7 +24,8 @@ class MainActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var projectionManager: MediaProjectionManager
-    private lateinit var apiKeyInput: EditText
+    private lateinit var cloudKeyInput: EditText
+    private lateinit var geminiKeyInput: EditText
     private var ocrReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,16 +41,18 @@ class MainActivity : Activity() {
         if (::status.isInitialized) refreshStatus()
     }
 
-    private fun buildUi(): LinearLayout {
+    private fun buildUi(): ScrollView {
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
 
+        val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28), dp(40), dp(28), dp(28))
+            setPadding(dp(28), dp(34), dp(28), dp(28))
             setBackgroundColor(Color.rgb(247, 248, 250))
         }
+        scroll.addView(root)
 
         root.addView(TextView(this).apply {
             text = "RSVP Reader"
@@ -58,7 +62,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         root.addView(TextView(this).apply {
-            text = "本文直接取得を優先し、取れない画面はCloud Vision OCRで読み取ります。"
+            text = "本文直接取得を優先し、OCR時はCloud Vision＋Gemini画像照合で誤字を補正します。"
             textSize = 16f
             setTextColor(Color.DKGRAY)
             gravity = Gravity.CENTER
@@ -75,7 +79,7 @@ class MainActivity : Activity() {
             bottomMargin = dp(12)
         })
 
-        apiKeyInput = EditText(this).apply {
+        cloudKeyInput = EditText(this).apply {
             hint = "Google Cloud Vision APIキー"
             textSize = 15f
             setSingleLine(true)
@@ -86,15 +90,15 @@ class MainActivity : Activity() {
                     .orEmpty()
             )
         }
-        root.addView(apiKeyInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
-            bottomMargin = dp(8)
+        root.addView(cloudKeyInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+            bottomMargin = dp(6)
         })
 
         root.addView(Button(this).apply {
             text = "2. Cloud Vision APIキーを保存"
             textSize = 15f
             setOnClickListener {
-                val key = apiKeyInput.text.toString().trim()
+                val key = cloudKeyInput.text.toString().trim()
                 getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
                     .edit()
                     .putString(PREF_API_KEY, key)
@@ -102,16 +106,51 @@ class MainActivity : Activity() {
                 refreshStatus()
                 Toast.makeText(
                     this@MainActivity,
-                    if (key.isBlank()) "APIキーを削除しました" else "APIキーを保存しました",
+                    if (key.isBlank()) "Cloud Vision APIキーを削除しました" else "Cloud Vision APIキーを保存しました",
                     Toast.LENGTH_SHORT
                 ).show()
             }
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)).apply {
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
+            bottomMargin = dp(10)
+        })
+
+        geminiKeyInput = EditText(this).apply {
+            hint = "Gemini APIキー（AI Studio）"
+            textSize = 15f
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(
+                getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+                    .getString(PREF_GEMINI_API_KEY, "")
+                    .orEmpty()
+            )
+        }
+        root.addView(geminiKeyInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+            bottomMargin = dp(6)
+        })
+
+        root.addView(Button(this).apply {
+            text = "3. Gemini APIキーを保存"
+            textSize = 15f
+            setOnClickListener {
+                val key = geminiKeyInput.text.toString().trim()
+                getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putString(PREF_GEMINI_API_KEY, key)
+                    .apply()
+                refreshStatus()
+                Toast.makeText(
+                    this@MainActivity,
+                    if (key.isBlank()) "Gemini APIキーを削除しました" else "Gemini APIキーを保存しました",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
             bottomMargin = dp(12)
         })
 
         root.addView(Button(this).apply {
-            text = "3. 画面キャプチャを開始"
+            text = "4. 画面キャプチャを開始"
             textSize = 16f
             setOnClickListener {
                 startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CAPTURE)
@@ -128,27 +167,28 @@ class MainActivity : Activity() {
         root.addView(status)
 
         root.addView(TextView(this).apply {
-            text = "Cloud Visionが失敗した場合だけ端末内ML Kitへ自動フォールバックします。\nKindleへ戻ると右端に ▶ が表示されます。"
+            text = "Geminiは元画像とOCR結果を照合し、誤字だけを補正します。補正結果が原文から変わりすぎた場合は自動で破棄します。"
             textSize = 14f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
-            setPadding(0, dp(20), 0, 0)
+            setPadding(0, dp(18), 0, dp(8))
         })
 
-        return root
+        return scroll
     }
 
     private fun refreshStatus() {
+        val prefs = getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
         val accessibilityOk = isReaderAccessibilityEnabled()
-        val hasCloudKey = getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
-            .getString(PREF_API_KEY, "")
-            .orEmpty()
-            .isNotBlank()
+        val hasCloudKey = prefs.getString(PREF_API_KEY, "").orEmpty().isNotBlank()
+        val hasGeminiKey = prefs.getString(PREF_GEMINI_API_KEY, "").orEmpty().isNotBlank()
 
         status.text = buildString {
             append(if (accessibilityOk) "✓ 本文直接取得：有効" else "△ 本文直接取得：未設定")
             append("\n")
             append(if (hasCloudKey) "✓ Cloud Vision：設定済み" else "△ Cloud Vision：APIキー未設定")
+            append("\n")
+            append(if (hasGeminiKey) "✓ Gemini画像照合：設定済み" else "△ Gemini画像照合：APIキー未設定")
             append("\n")
             append(if (ocrReady) "✓ 画面キャプチャ：有効" else "画面キャプチャ：この起動中は未設定")
         }
@@ -196,6 +236,7 @@ class MainActivity : Activity() {
     companion object {
         const val CLOUD_PREFS = "cloud_vision"
         const val PREF_API_KEY = "api_key"
+        const val PREF_GEMINI_API_KEY = "gemini_api_key"
         private const val REQUEST_CAPTURE = 1001
         private const val REQUEST_NOTIFICATION = 1002
     }
