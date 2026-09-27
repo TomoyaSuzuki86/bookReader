@@ -144,44 +144,98 @@ class CaptureService : Service() {
             return
         }
 
-        recognizer.process(InputImage.fromBitmap(bitmap, 0))
+        val prepared = prepareForOcr(bitmap)
+        recognizer.process(InputImage.fromBitmap(prepared, 0))
             .addOnSuccessListener { result ->
-                sendOcrResult(extractReadingText(result))
+                sendOcrResult(
+                    extractReadingText(
+                        result = result,
+                        imageWidth = prepared.width,
+                        imageHeight = prepared.height
+                    )
+                )
             }
             .addOnFailureListener {
                 sendOcrResult(null)
             }
             .addOnCompleteListener {
+                if (prepared !== bitmap) prepared.recycle()
                 bitmap.recycle()
             }
     }
 
-    private fun extractReadingText(result: Text): String {
+    private fun prepareForOcr(source: Bitmap): Bitmap {
+        val top = (source.height * 0.035f).toInt()
+        val bottom = (source.height * 0.965f).toInt()
+        val cropHeight = (bottom - top).coerceAtLeast(1)
+
+        val cropped = Bitmap.createBitmap(
+            source,
+            0,
+            top.coerceAtLeast(0),
+            source.width,
+            cropHeight.coerceAtMost(source.height - top.coerceAtLeast(0))
+        )
+
+        val scale = minOf(
+            1.6f,
+            1800f / cropped.width.toFloat()
+        ).coerceAtLeast(1f)
+
+        if (scale <= 1.01f) return cropped
+
+        val scaled = Bitmap.createScaledBitmap(
+            cropped,
+            (cropped.width * scale).toInt(),
+            (cropped.height * scale).toInt(),
+            true
+        )
+        if (scaled !== cropped) cropped.recycle()
+        return scaled
+    }
+
+    private fun extractReadingText(
+        result: Text,
+        imageWidth: Int,
+        imageHeight: Int
+    ): String {
         data class Item(val text: String, val box: Rect)
 
-        val topCut = (screenHeight * 0.06f).toInt()
-        val bottomCut = (screenHeight * 0.94f).toInt()
+        val topCut = (imageHeight * 0.015f).toInt()
+        val bottomCut = (imageHeight * 0.985f).toInt()
 
         val items = result.textBlocks
             .flatMap { it.lines }
             .mapNotNull { line ->
                 val box = line.boundingBox ?: return@mapNotNull null
-                val value = line.text.trim()
+                val value = TextChunker.normalizeSource(line.text)
                 if (value.isBlank()) return@mapNotNull null
                 if (box.bottom < topCut || box.top > bottomCut) return@mapNotNull null
+                if (box.right < 0 || box.left > imageWidth) return@mapNotNull null
                 Item(value, box)
             }
 
-        if (items.isEmpty()) return result.text
-
-        val verticalRatio = items.count { it.box.height() > it.box.width() * 1.25f }.toFloat() / items.size
-        val ordered = if (verticalRatio >= 0.45f) {
-            items.sortedWith(compareByDescending<Item> { it.box.centerX() }.thenBy { it.box.top })
-        } else {
-            items.sortedWith(compareBy<Item> { it.box.top }.thenBy { it.box.left })
+        if (items.isEmpty()) {
+            return TextChunker.normalizeSource(result.text)
         }
 
-        return ordered.joinToString(separator = "") { it.text }
+        val verticalRatio = items.count {
+            it.box.height() > it.box.width() * 1.25f
+        }.toFloat() / items.size
+
+        val ordered = if (verticalRatio >= 0.45f) {
+            items.sortedWith(
+                compareByDescending<Item> { it.box.centerX() }
+                    .thenBy { it.box.top }
+            )
+        } else {
+            items.sortedWith(
+                compareBy<Item> { it.box.top }
+                    .thenBy { it.box.left }
+            )
+        }
+
+        return TextChunker.stitchFragments(ordered.map { it.text })
     }
 
     private fun sendOcrResult(text: String?) {
