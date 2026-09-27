@@ -69,9 +69,27 @@ class ReaderAccessibilityService : AccessibilityService() {
             val source = intent.getStringExtra(
                 CaptureService.EXTRA_OCR_SOURCE
             ).orEmpty().ifBlank { "OCR" }
+            val visionError = intent.getStringExtra(
+                CaptureService.EXTRA_OCR_ERROR
+            ).orEmpty()
+
+            if (visionError.isNotBlank()) {
+                Toast.makeText(
+                    this@ReaderAccessibilityService,
+                    "Cloud Vision失敗 → ML Kit\n$visionError",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
 
             pendingAfterPageTurn = false
-            startPage(text, source)
+            startPage(
+                text,
+                if (visionError.isBlank()) {
+                    source
+                } else {
+                    "$source（Vision失敗）"
+                }
+            )
         }
     }
 
