@@ -236,6 +236,8 @@ class MainActivity : Activity() {
     companion object {
         const val CLOUD_PREFS = "cloud_vision"
         const val PREF_API_KEY = "api_key"
+        const val GEMINI_PREFS = "gemini"
+        const val PREF_GEMINI_API_KEY = "api_key"
         const val PREF_GEMINI_API_KEY = "gemini_api_key"
         private const val REQUEST_CAPTURE = 1001
         private const val REQUEST_NOTIFICATION = 1002
