@@ -128,7 +128,7 @@ class MainActivity : Activity() {
         root.addView(status)
 
         root.addView(TextView(this).apply {
-            text = "Cloud Vision失敗時は理由を表示してからML Kitへフォールバックします。\nKindleへ戻ると右端に ▶ が表示されます。"
+            text = "Cloud Visionが失敗した場合だけ端末内ML Kitへ自動フォールバックします。\nKindleへ戻ると右端に ▶ が表示されます。"
             textSize = 14f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
