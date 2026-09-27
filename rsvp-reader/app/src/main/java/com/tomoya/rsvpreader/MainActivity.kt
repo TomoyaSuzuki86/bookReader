@@ -58,7 +58,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         root.addView(TextView(this).apply {
-            text = "本文直接取得を優先し、取れない画面はCloud Vision OCRで読み取ります。"
+            text = "本文直接取得を優先し、取れない画面はCloud Vision OCRで読み取ります。\nRSVPは日本語を1語ずつ、文字数に応じた速度で表示します。"
             textSize = 16f
             setTextColor(Color.DKGRAY)
             gravity = Gravity.CENTER
