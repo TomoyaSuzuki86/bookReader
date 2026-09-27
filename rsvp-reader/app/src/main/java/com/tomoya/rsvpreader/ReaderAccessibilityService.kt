@@ -29,6 +29,11 @@ import kotlin.math.max
 
 class ReaderAccessibilityService : AccessibilityService() {
 
+    private data class TextBlock(
+        val text: String,
+        val bounds: Rect
+    )
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var windowManager: WindowManager
 
@@ -43,10 +48,14 @@ class ReaderAccessibilityService : AccessibilityService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != CaptureService.ACTION_OCR_RESULT) return
             if (!waitingForOcr) return
+
             waitingForOcr = false
             mainHandler.removeCallbacks(ocrTimeout)
 
-            val text = intent.getStringExtra(CaptureService.EXTRA_OCR_TEXT).orEmpty().trim()
+            val text = TextChunker.normalizeSource(
+                intent.getStringExtra(CaptureService.EXTRA_OCR_TEXT).orEmpty()
+            )
+
             if (text.length < MIN_TEXT_LENGTH) {
                 finishWithMessage("本文を取得できませんでした。OCR補助を有効にしているか確認してください")
                 return
@@ -170,6 +179,7 @@ class ReaderAccessibilityService : AccessibilityService() {
     private fun beginReading() {
         if (readerOverlay != null || waitingForOcr) return
         bubble?.visibility = View.GONE
+
         mainHandler.postDelayed({
             val text = extractCurrentPageText()
             if (text.length >= MIN_TEXT_LENGTH) {
@@ -185,39 +195,109 @@ class ReaderAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return ""
         if (root.packageName?.toString() == packageName) return ""
 
-        val parts = mutableListOf<String>()
-        collectLeafText(root, parts)
+        val blocks = collectBestBlocks(root)
+        if (blocks.isEmpty()) return ""
 
-        val deduped = mutableListOf<String>()
-        for (part in parts) {
-            val normalized = part.replace(Regex("\\s+"), " ").trim()
-            if (normalized.isBlank()) continue
-            if (deduped.lastOrNull() == normalized) continue
-            deduped += normalized
+        val verticalRatio = blocks.count {
+            it.bounds.height() > it.bounds.width() * 1.2f
+        }.toFloat() / blocks.size
+
+        val ordered = if (verticalRatio >= 0.45f) {
+            blocks.sortedWith(
+                compareByDescending<TextBlock> { it.bounds.centerX() }
+                    .thenBy { it.bounds.top }
+            )
+        } else {
+            blocks.sortedWith(
+                compareBy<TextBlock> { it.bounds.top }
+                    .thenBy { it.bounds.left }
+            )
         }
 
-        return deduped.joinToString(separator = "")
+        val parts = mutableListOf<String>()
+        var previousCompact: String? = null
+
+        for (block in ordered) {
+            val value = TextChunker.normalizeSource(block.text)
+            if (value.isBlank()) continue
+
+            val compact = normalizeForCompare(value)
+            if (compact.isBlank()) continue
+            if (compact == previousCompact) continue
+
+            parts += value
+            previousCompact = compact
+        }
+
+        return TextChunker.stitchFragments(parts)
     }
 
-    private fun collectLeafText(node: AccessibilityNodeInfo, output: MutableList<String>): Boolean {
-        if (!node.isVisibleToUser) return false
+    private fun collectBestBlocks(node: AccessibilityNodeInfo): List<TextBlock> {
+        if (!node.isVisibleToUser || !isReadingArea(node)) return emptyList()
 
-        var childCollected = false
+        val childBlocks = mutableListOf<TextBlock>()
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            childCollected = collectLeafText(child, output) || childCollected
+            childBlocks += collectBestBlocks(child)
         }
 
-        val own = node.text?.toString()?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: node.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }
+        val ownText = node.text?.toString()?.takeIf { it.isNotBlank() }
+            ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
 
-        if (!childCollected && own != null && isReadingArea(node)) {
-            output += own
-            return true
+        if (ownText == null || !looksLikeBodyText(node, ownText)) {
+            return childBlocks
         }
 
-        return childCollected || own != null
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        val normalizedOwn = TextChunker.normalizeSource(ownText)
+        if (normalizedOwn.isBlank()) return childBlocks
+
+        if (childBlocks.isEmpty()) {
+            return listOf(TextBlock(normalizedOwn, bounds))
+        }
+
+        val childText = TextChunker.stitchFragments(childBlocks.map { it.text })
+        val ownCompact = normalizeForCompare(normalizedOwn)
+        val childCompact = normalizeForCompare(childText)
+
+        val screenArea = resources.displayMetrics.widthPixels.toLong() *
+            resources.displayMetrics.heightPixels.toLong()
+        val nodeArea = bounds.width().toLong().coerceAtLeast(0L) *
+            bounds.height().toLong().coerceAtLeast(0L)
+        val almostFullScreen = screenArea > 0L &&
+            nodeArea.toDouble() / screenArea.toDouble() > 0.82
+
+        val parentLooksLikeParagraph =
+            !almostFullScreen &&
+            ownCompact.length >= PARAGRAPH_MIN_LENGTH &&
+            childCompact.isNotBlank() &&
+            ownCompact.length >= (childCompact.length * 0.72f).toInt()
+
+        return if (parentLooksLikeParagraph) {
+            listOf(TextBlock(normalizedOwn, bounds))
+        } else {
+            childBlocks
+        }
+    }
+
+    private fun looksLikeBodyText(node: AccessibilityNodeInfo, raw: String): Boolean {
+        val text = TextChunker.normalizeSource(raw)
+        if (text.length < 2) return false
+
+        val className = node.className?.toString().orEmpty()
+        if (className.contains("Button", ignoreCase = true)) return false
+        if (className.contains("ImageView", ignoreCase = true)) return false
+        if (node.isClickable && text.length < 16) return false
+
+        if (text.matches(Regex("^[0-9０-９%％/・:：.\\-]+$"))) return false
+
+        val readableChars = text.count { ch ->
+            ch.isLetterOrDigit() ||
+                ch in '\u3040'..'\u30ff' ||
+                ch in '\u3400'..'\u9fff'
+        }
+        return readableChars >= 2
     }
 
     private fun isReadingArea(node: AccessibilityNodeInfo): Boolean {
@@ -227,25 +307,23 @@ class ReaderAccessibilityService : AccessibilityService() {
         val width = resources.displayMetrics.widthPixels
         if (bounds.isEmpty) return false
 
-        val topCut = (height * 0.04f).toInt()
+        val topCut = (height * 0.035f).toInt()
         val bottomCut = (height * 0.97f).toInt()
         if (bounds.bottom < topCut || bounds.top > bottomCut) return false
         if (bounds.right < 0 || bounds.left > width) return false
-
-        val className = node.className?.toString().orEmpty()
-        if (className.contains("Button", ignoreCase = true)) return false
-        if (className.contains("ImageView", ignoreCase = true)) return false
         return true
     }
 
     private fun startPage(text: String, source: String) {
-        val chunks = TextChunker.chunk(text)
+        val cleaned = TextChunker.normalizeSource(text)
+        val chunks = TextChunker.chunk(cleaned)
+
         if (chunks.isEmpty()) {
             finishWithMessage("表示できる文章がありません")
             return
         }
 
-        lastPageText = normalizeForCompare(text)
+        lastPageText = normalizeForCompare(cleaned)
         showReader(chunks, source)
     }
 
@@ -255,6 +333,7 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         val prefs = getSharedPreferences("reader", Context.MODE_PRIVATE)
         var speed = prefs.getInt("chars_per_minute", 650).coerceIn(200, 1400)
+        var swipeLeft = prefs.getBoolean(PREF_SWIPE_LEFT, true)
         var index = 0
         var playing = true
 
@@ -278,13 +357,19 @@ class ReaderAccessibilityService : AccessibilityService() {
             setTextColor(Color.WHITE)
             textSize = 48f
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(60), dp(12), dp(60))
+            setPadding(dp(12), dp(54), dp(12), dp(54))
         }
 
         val speedLabel = TextView(this).apply {
             setTextColor(Color.rgb(190, 198, 210))
             textSize = 14f
             gravity = Gravity.CENTER
+        }
+
+        val directionButton = Button(this).apply {
+            textSize = 14f
+            minHeight = 0
+            minimumHeight = 0
         }
 
         val controls = LinearLayout(this).apply {
@@ -302,11 +387,20 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         lateinit var tick: Runnable
 
+        fun refreshDirection() {
+            directionButton.text = if (swipeLeft) {
+                "自動ページ送り：← 左へスワイプ"
+            } else {
+                "自動ページ送り：右へスワイプ →"
+            }
+        }
+
         fun refreshLabels(extra: String? = null) {
             index = index.coerceIn(0, chunks.lastIndex)
             word.text = chunks[index]
             progress.text = "${index + 1} / ${chunks.size}  ·  $source"
             speedLabel.text = extra ?: "$speed 文字/分  ·  読了時に自動で次ページ"
+            refreshDirection()
         }
 
         fun scheduleNext() {
@@ -315,7 +409,7 @@ class ReaderAccessibilityService : AccessibilityService() {
 
             if (index >= chunks.lastIndex) {
                 refreshLabels("次ページを取得中…")
-                mainHandler.postDelayed({ advancePage() }, 220)
+                mainHandler.postDelayed({ advancePage(swipeLeft) }, 220)
                 return
             }
 
@@ -326,18 +420,21 @@ class ReaderAccessibilityService : AccessibilityService() {
                 current.endsWith('、') -> 130L
                 else -> 0L
             }
-            mainHandler.postDelayed(tick, (base + punctuationBonus).coerceIn(150L, 1900L))
+            mainHandler.postDelayed(
+                tick,
+                (base + punctuationBonus).coerceIn(150L, 1900L)
+            )
         }
 
         tick = Runnable {
-            if (playing) {
-                if (index < chunks.lastIndex) {
-                    index++
-                    refreshLabels()
-                    scheduleNext()
-                } else {
-                    scheduleNext()
-                }
+            if (!playing) return@Runnable
+
+            if (index < chunks.lastIndex) {
+                index++
+                refreshLabels()
+                scheduleNext()
+            } else {
+                scheduleNext()
             }
         }
 
@@ -350,6 +447,12 @@ class ReaderAccessibilityService : AccessibilityService() {
                 mainHandler.removeCallbacks(tick)
                 refreshLabels("一時停止  ·  $speed 文字/分")
             }
+        }
+
+        directionButton.setOnClickListener {
+            swipeLeft = !swipeLeft
+            prefs.edit().putBoolean(PREF_SWIPE_LEFT, swipeLeft).apply()
+            refreshDirection()
         }
 
         val slower = control("−") {
@@ -390,19 +493,62 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
 
         listOf(slower, prev, playPause, next, faster, close).forEach { button ->
-            controls.addView(button, LinearLayout.LayoutParams(0, dp(52), 1f).apply {
-                marginStart = dp(2)
-                marginEnd = dp(2)
-            })
+            controls.addView(
+                button,
+                LinearLayout.LayoutParams(0, dp(52), 1f).apply {
+                    marginStart = dp(2)
+                    marginEnd = dp(2)
+                }
+            )
         }
 
-        content.addView(progress, LinearLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
-        content.addView(word, LinearLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        content.addView(speedLabel, LinearLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(12)
-        })
-        content.addView(controls, LinearLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
-        root.addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        content.addView(
+            progress,
+            LinearLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        content.addView(
+            word,
+            LinearLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+        content.addView(
+            speedLabel,
+            LinearLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(8)
+            }
+        )
+        content.addView(
+            directionButton,
+            LinearLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(46)
+            ).apply {
+                bottomMargin = dp(8)
+            }
+        )
+        content.addView(
+            controls,
+            LinearLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        root.addView(
+            content,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -418,18 +564,16 @@ class ReaderAccessibilityService : AccessibilityService() {
         scheduleNext()
     }
 
-    private fun advancePage() {
+    private fun advancePage(swipeLeft: Boolean) {
         removeReaderOverlay()
         bubble?.visibility = View.GONE
 
         mainHandler.postDelayed({
-            val semanticMoved = performScrollForward()
-            if (semanticMoved) {
-                waitForNewPage(0, allowGestureFallback = true)
-            } else {
-                dispatchNextPageGesture {
-                    waitForNewPage(0, allowGestureFallback = false)
-                }
+            dispatchPageGesture(swipeLeft) {
+                waitForNewPage(
+                    attempt = 0,
+                    allowSemanticFallback = true
+                )
             }
         }, 100)
     }
@@ -441,7 +585,9 @@ class ReaderAccessibilityService : AccessibilityService() {
     }
 
     private fun findScrollableForwardNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        val supportsForward = node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD }
+        val supportsForward = node.actionList.any {
+            it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        }
         if (node.isScrollable || supportsForward) return node
 
         for (i in 0 until node.childCount) {
@@ -452,49 +598,85 @@ class ReaderAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun waitForNewPage(attempt: Int, allowGestureFallback: Boolean) {
+    private fun waitForNewPage(
+        attempt: Int,
+        allowSemanticFallback: Boolean
+    ) {
         mainHandler.postDelayed({
             val nextText = extractCurrentPageText()
-            if (nextText.length >= MIN_TEXT_LENGTH && !samePage(nextText, lastPageText)) {
+
+            if (
+                nextText.length >= MIN_TEXT_LENGTH &&
+                !samePage(nextText, lastPageText)
+            ) {
                 pendingAfterPageTurn = false
                 startPage(nextText, "本文")
                 return@postDelayed
             }
 
             if (attempt < 2) {
-                waitForNewPage(attempt + 1, allowGestureFallback)
+                waitForNewPage(
+                    attempt = attempt + 1,
+                    allowSemanticFallback = allowSemanticFallback
+                )
                 return@postDelayed
             }
 
-            if (allowGestureFallback) {
-                dispatchNextPageGesture {
-                    waitForNewPage(0, allowGestureFallback = false)
-                }
+            if (allowSemanticFallback && performScrollForward()) {
+                waitForNewPage(
+                    attempt = 0,
+                    allowSemanticFallback = false
+                )
             } else {
                 requestOcrFallback(afterPageTurn = true)
             }
         }, if (attempt == 0) 650L else 350L)
     }
 
-    private fun dispatchNextPageGesture(onDone: () -> Unit) {
+    private fun dispatchPageGesture(
+        swipeLeft: Boolean,
+        onDone: () -> Unit
+    ) {
         val metrics = resources.displayMetrics
         val y = metrics.heightPixels * 0.55f
-        val path = Path().apply {
-            moveTo(metrics.widthPixels * 0.82f, y)
-            lineTo(metrics.widthPixels * 0.18f, y)
+        val startX = if (swipeLeft) {
+            metrics.widthPixels * 0.82f
+        } else {
+            metrics.widthPixels * 0.18f
         }
+        val endX = if (swipeLeft) {
+            metrics.widthPixels * 0.18f
+        } else {
+            metrics.widthPixels * 0.82f
+        }
+
+        val path = Path().apply {
+            moveTo(startX, y)
+            lineTo(endX, y)
+        }
+
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 260))
+            .addStroke(
+                GestureDescription.StrokeDescription(
+                    path,
+                    0,
+                    260
+                )
+            )
             .build()
 
         val accepted = dispatchGesture(
             gesture,
             object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
+                override fun onCompleted(
+                    gestureDescription: GestureDescription?
+                ) {
                     mainHandler.postDelayed(onDone, 120)
                 }
 
-                override fun onCancelled(gestureDescription: GestureDescription?) {
+                override fun onCancelled(
+                    gestureDescription: GestureDescription?
+                ) {
                     finishWithMessage("自動ページ送りに失敗しました")
                 }
             },
@@ -510,7 +692,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         waitingForOcr = true
         pendingAfterPageTurn = afterPageTurn
         mainHandler.removeCallbacks(ocrTimeout)
-        mainHandler.postDelayed(ocrTimeout, 2200)
+        mainHandler.postDelayed(ocrTimeout, 2600)
 
         runCatching {
             startService(
@@ -525,13 +707,18 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun samePage(candidate: String, previousNormalized: String): Boolean {
+    private fun samePage(
+        candidate: String,
+        previousNormalized: String
+    ): Boolean {
         if (previousNormalized.isBlank()) return false
         return normalizeForCompare(candidate) == previousNormalized
     }
 
     private fun normalizeForCompare(text: String): String =
-        text.replace(Regex("\\s+"), "").trim()
+        TextChunker.normalizeSource(text)
+            .replace(" ", "")
+            .trim()
 
     private fun closeReader() {
         waitingForOcr = false
@@ -550,13 +737,18 @@ class ReaderAccessibilityService : AccessibilityService() {
     }
 
     private fun removeReaderOverlay() {
-        readerOverlay?.let { runCatching { windowManager.removeView(it) } }
+        readerOverlay?.let {
+            runCatching { windowManager.removeView(it) }
+        }
         readerOverlay = null
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
 
     companion object {
         private const val MIN_TEXT_LENGTH = 18
+        private const val PARAGRAPH_MIN_LENGTH = 14
+        private const val PREF_SWIPE_LEFT = "page_turn_swipe_left"
     }
 }
