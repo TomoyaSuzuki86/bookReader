@@ -369,6 +369,11 @@ class CaptureService : Service() {
             ?: "Vision HTTP $httpStatus"
     }
 
+    private data class VisionWord(
+        val text: String,
+        val glyphSize: Double
+    )
+
     private fun parseCloudVisionText(responseText: String): String {
         val root = JSONObject(responseText)
         val response = root.optJSONArray("responses")
@@ -377,18 +382,201 @@ class CaptureService : Service() {
 
         if (response.has("error")) return ""
 
-        val fullText = response
-            .optJSONObject("fullTextAnnotation")
+        val full = response.optJSONObject("fullTextAnnotation")
+        val filtered = full?.let {
+            extractVisionTextWithoutRuby(it)
+        }.orEmpty()
+
+        if (filtered.isNotBlank()) {
+            return filtered
+        }
+
+        val fullText = full
             ?.optString("text")
             .orEmpty()
 
-        if (fullText.isNotBlank()) return fullText
+        if (fullText.isNotBlank()) {
+            return fullText
+        }
 
         return response
             .optJSONArray("textAnnotations")
             ?.optJSONObject(0)
             ?.optString("description")
             .orEmpty()
+    }
+
+    private fun extractVisionTextWithoutRuby(
+        full: JSONObject
+    ): String {
+        val pages = full.optJSONArray("pages")
+            ?: return ""
+
+        val words = mutableListOf<VisionWord>()
+
+        for (pageIndex in 0 until pages.length()) {
+            val page = pages.optJSONObject(pageIndex)
+                ?: continue
+            val blocks = page.optJSONArray("blocks")
+                ?: continue
+
+            for (blockIndex in 0 until blocks.length()) {
+                val block = blocks.optJSONObject(blockIndex)
+                    ?: continue
+                val paragraphs = block.optJSONArray("paragraphs")
+                    ?: continue
+
+                for (paragraphIndex in 0 until paragraphs.length()) {
+                    val paragraph = paragraphs.optJSONObject(paragraphIndex)
+                        ?: continue
+                    val paragraphWords = paragraph.optJSONArray("words")
+                        ?: continue
+
+                    for (wordIndex in 0 until paragraphWords.length()) {
+                        val word = paragraphWords.optJSONObject(wordIndex)
+                            ?: continue
+                        val symbols = word.optJSONArray("symbols")
+                            ?: continue
+
+                        val text = buildString {
+                            for (symbolIndex in 0 until symbols.length()) {
+                                append(
+                                    symbols.optJSONObject(symbolIndex)
+                                        ?.optString("text")
+                                        .orEmpty()
+                                )
+                            }
+                        }
+
+                        if (text.isBlank()) continue
+
+                        val glyphSize = estimateGlyphSize(
+                            word.optJSONObject("boundingBox"),
+                            text
+                        )
+
+                        if (glyphSize > 0.0) {
+                            words += VisionWord(
+                                text = text,
+                                glyphSize = glyphSize
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (words.isEmpty()) return ""
+
+        val medianGlyph = words
+            .map { it.glyphSize }
+            .sorted()
+            .let { sizes ->
+                val middle = sizes.size / 2
+                if (sizes.size % 2 == 0) {
+                    (sizes[middle - 1] + sizes[middle]) / 2.0
+                } else {
+                    sizes[middle]
+                }
+            }
+
+        if (medianGlyph <= 0.0) return ""
+
+        val kept = words.filterNot { word ->
+            isLikelyRuby(
+                text = word.text,
+                glyphSize = word.glyphSize,
+                medianGlyph = medianGlyph
+            )
+        }
+
+        if (kept.isEmpty()) return ""
+
+        return TextChunker.stitchFragments(
+            kept.map { it.text }
+        )
+    }
+
+    private fun estimateGlyphSize(
+        boundingBox: JSONObject?,
+        text: String
+    ): Double {
+        val vertices = boundingBox
+            ?.optJSONArray("vertices")
+            ?: return 0.0
+
+        if (vertices.length() < 2) return 0.0
+
+        var minX = Int.MAX_VALUE
+        var maxX = Int.MIN_VALUE
+        var minY = Int.MAX_VALUE
+        var maxY = Int.MIN_VALUE
+
+        for (i in 0 until vertices.length()) {
+            val vertex = vertices.optJSONObject(i)
+                ?: continue
+            val x = vertex.optInt("x", 0)
+            val y = vertex.optInt("y", 0)
+
+            minX = minOf(minX, x)
+            maxX = maxOf(maxX, x)
+            minY = minOf(minY, y)
+            maxY = maxOf(maxY, y)
+        }
+
+        if (
+            minX == Int.MAX_VALUE ||
+            minY == Int.MAX_VALUE
+        ) {
+            return 0.0
+        }
+
+        val width = (maxX - minX)
+            .coerceAtLeast(1)
+            .toDouble()
+        val height = (maxY - minY)
+            .coerceAtLeast(1)
+            .toDouble()
+        val count = text.count {
+            it.isLetterOrDigit() ||
+                it in '\u3040'..'\u30ff' ||
+                it in '\u3400'..'\u9fff'
+        }.coerceAtLeast(1).toDouble()
+
+        // Horizontal: width/count approximates one glyph.
+        // Vertical: height/count approximates one glyph.
+        // The larger of the two is stable for both writing directions.
+        return maxOf(
+            width / count,
+            height / count
+        )
+    }
+
+    private fun isLikelyRuby(
+        text: String,
+        glyphSize: Double,
+        medianGlyph: Double
+    ): Boolean {
+        val readable = text.filter {
+            it.isLetterOrDigit() ||
+                it in '\u3040'..'\u30ff' ||
+                it in '\u3400'..'\u9fff'
+        }
+
+        if (readable.length < 2) return false
+
+        val kanaCount = readable.count {
+            it in '\u3040'..'\u30ff'
+        }
+        val kanaRatio =
+            kanaCount.toDouble() /
+                readable.length.toDouble()
+
+        val clearlySmaller =
+            glyphSize < medianGlyph * RUBY_SIZE_RATIO
+
+        return clearlySmaller &&
+            kanaRatio >= RUBY_KANA_RATIO
     }
 
     private fun encodeJpegBase64(bitmap: Bitmap): String {
@@ -643,5 +831,8 @@ class CaptureService : Service() {
         private const val CLOUD_JPEG_QUALITY = 88
         private const val CLOUD_CONNECT_TIMEOUT_MS = 8_000
         private const val CLOUD_READ_TIMEOUT_MS = 15_000
+
+        private const val RUBY_SIZE_RATIO = 0.68
+        private const val RUBY_KANA_RATIO = 0.75
     }
 }
