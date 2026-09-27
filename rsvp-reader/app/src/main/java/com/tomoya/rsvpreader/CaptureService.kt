@@ -305,6 +305,256 @@ class CaptureService : Service() {
         }
     }
 
+    private fun finishWithOptionalGemini(
+        original: Bitmap,
+        prepared: Bitmap,
+        rawText: String,
+        source: String
+    ) {
+        val normalized = TextChunker.normalizeSource(rawText)
+        if (normalized.isBlank()) {
+            releaseBitmaps(original, prepared)
+            sendOcrResult(null, source)
+            return
+        }
+
+        val geminiKey = getSharedPreferences(
+            MainActivity.GEMINI_PREFS,
+            MODE_PRIVATE
+        ).getString(
+            MainActivity.PREF_GEMINI_API_KEY,
+            ""
+        ).orEmpty().trim()
+
+        if (geminiKey.isBlank()) {
+            releaseBitmaps(original, prepared)
+            sendOcrResult(normalized, source)
+            return
+        }
+
+        runGeminiCorrection(
+            bitmap = prepared,
+            rawText = normalized,
+            apiKey = geminiKey,
+            onSuccess = { corrected ->
+                val accepted = acceptGeminiCorrection(
+                    original = normalized,
+                    corrected = corrected
+                )
+                releaseBitmaps(original, prepared)
+                if (accepted != null) {
+                    sendOcrResult(accepted, "$source + Gemini")
+                } else {
+                    sendOcrResult(
+                        normalized,
+                        "$source（Gemini補正破棄）"
+                    )
+                }
+            },
+            onFailure = {
+                releaseBitmaps(original, prepared)
+                sendOcrResult(
+                    normalized,
+                    "$source（Gemini失敗）"
+                )
+            }
+        )
+    }
+
+    private fun runGeminiCorrection(
+        bitmap: Bitmap,
+        rawText: String,
+        apiKey: String,
+        onSuccess: (String) -> Unit,
+        onFailure: () -> Unit
+    ) {
+        networkExecutor.execute {
+            try {
+                val imageBase64 = encodeJpegBase64(bitmap)
+                val prompt = """
+                    あなたは日本語書籍OCRの校正器です。
+                    添付画像の本文を最優先の根拠として、OCR候補の誤認識だけを修正してください。
+
+                    厳守:
+                    - 画像にない文章を追加しない。
+                    - 言い換え、要約、説明、補完をしない。
+                    - 漢字、かな、数字、句読点を画像どおりにする。
+                    - 視覚的な折り返し改行は文章として自然につなぐ。
+                    - ステータスバー、ページ番号、ボタン、メニューなど本文以外は除外する。
+                    - 判別できない箇所を推測して創作しない。
+                    - 出力は修正済み本文だけ。前置きやMarkdownは禁止。
+
+                    OCR候補:
+                    $rawText
+                """.trimIndent()
+
+                val request = JSONObject().apply {
+                    put(
+                        "contents",
+                        JSONArray().put(
+                            JSONObject().put(
+                                "parts",
+                                JSONArray()
+                                    .put(
+                                        JSONObject().put(
+                                            "inline_data",
+                                            JSONObject()
+                                                .put("mime_type", "image/jpeg")
+                                                .put("data", imageBase64)
+                                        )
+                                    )
+                                    .put(
+                                        JSONObject().put("text", prompt)
+                                    )
+                            )
+                        )
+                    )
+                    put(
+                        "generationConfig",
+                        JSONObject()
+                            .put("temperature", 0)
+                            .put("maxOutputTokens", 4096)
+                    )
+                }
+
+                val connection = (
+                    URL(
+                        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+                    ).openConnection() as HttpURLConnection
+                ).apply {
+                    requestMethod = "POST"
+                    connectTimeout = GEMINI_CONNECT_TIMEOUT_MS
+                    readTimeout = GEMINI_READ_TIMEOUT_MS
+                    doOutput = true
+                    setRequestProperty(
+                        "Content-Type",
+                        "application/json; charset=utf-8"
+                    )
+                    setRequestProperty(
+                        "x-goog-api-key",
+                        apiKey
+                    )
+                }
+
+                try {
+                    connection.outputStream.use { stream ->
+                        stream.write(
+                            request.toString()
+                                .toByteArray(StandardCharsets.UTF_8)
+                        )
+                    }
+
+                    val status = connection.responseCode
+                    val responseText = (
+                        if (status in 200..299) {
+                            connection.inputStream
+                        } else {
+                            connection.errorStream
+                        }
+                    )?.bufferedReader()
+                        ?.use { it.readText() }
+                        .orEmpty()
+
+                    if (status !in 200..299) {
+                        throw IllegalStateException(
+                            "Gemini HTTP $status"
+                        )
+                    }
+
+                    val corrected = parseGeminiText(responseText)
+                    if (corrected.isBlank()) {
+                        throw IllegalStateException(
+                            "Gemini returned no text"
+                        )
+                    }
+
+                    mainHandler.post {
+                        onSuccess(corrected)
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (_: Throwable) {
+                mainHandler.post(onFailure)
+            }
+        }
+    }
+
+    private fun parseGeminiText(responseText: String): String {
+        val parts = JSONObject(responseText)
+            .optJSONArray("candidates")
+            ?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts")
+            ?: return ""
+
+        val result = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val value = parts
+                .optJSONObject(i)
+                ?.optString("text")
+                .orEmpty()
+            if (value.isNotBlank()) {
+                if (result.isNotEmpty()) result.append('\n')
+                result.append(value)
+            }
+        }
+        return result.toString().trim()
+    }
+
+    private fun acceptGeminiCorrection(
+        original: String,
+        corrected: String
+    ): String? {
+        val base = TextChunker.normalizeSource(original).trim()
+        val fixed = TextChunker.normalizeSource(corrected).trim()
+        if (base.length < 4 || fixed.length < 4) return null
+
+        val lengthRatio =
+            fixed.length.toDouble() / base.length.toDouble()
+        if (lengthRatio < 0.72 || lengthRatio > 1.28) {
+            return null
+        }
+
+        val a = compactForDiff(base)
+        val b = compactForDiff(fixed)
+        val distance = levenshtein(a, b)
+        val denominator = maxOf(a.length, b.length)
+            .coerceAtLeast(1)
+        val changeRatio =
+            distance.toDouble() / denominator.toDouble()
+
+        return if (changeRatio <= 0.32) fixed else null
+    }
+
+    private fun compactForDiff(text: String): String =
+        text.replace(Regex("[\\s　]+"), "")
+
+    private fun levenshtein(a: String, b: String): Int {
+        if (a == b) return 0
+        if (a.isEmpty()) return b.length
+        if (b.isEmpty()) return a.length
+
+        var previous = IntArray(b.length + 1) { it }
+
+        for (i in a.indices) {
+            val current = IntArray(b.length + 1)
+            current[0] = i + 1
+
+            for (j in b.indices) {
+                val cost = if (a[i] == b[j]) 0 else 1
+                current[j + 1] = minOf(
+                    current[j] + 1,
+                    previous[j + 1] + 1,
+                    previous[j] + cost
+                )
+            }
+            previous = current
+        }
+
+        return previous[b.length]
+    }
+
     private fun parseCloudVisionText(responseText: String): String {
         val root = JSONObject(responseText)
         val response = root.optJSONArray("responses")
