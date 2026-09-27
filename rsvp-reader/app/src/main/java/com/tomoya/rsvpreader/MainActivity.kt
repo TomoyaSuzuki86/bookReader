@@ -90,7 +90,7 @@ class MainActivity : Activity() {
         root.addView(status)
 
         root.addView(TextView(this).apply {
-            text = "Kindleへ戻ると画面右端に ▶ が表示されます。\n本文はAccessibilityから直接取得し、読了すると自動で次ページへ進みます。"
+            text = "Kindleへ戻ると画面右端に ▶ が表示されます。\n本文はAccessibilityから直接取得します。\n読書画面内で自動ページ送りの左右方向も切り替えられます。"
             textSize = 14f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
