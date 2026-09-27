@@ -2,11 +2,11 @@ package com.tomoya.rsvpreader
 
 import android.Manifest
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.media.projection.MediaProjectionManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -21,6 +21,7 @@ class MainActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var projectionManager: MediaProjectionManager
+    private var ocrReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -46,38 +47,38 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(247, 248, 250))
         }
 
-        val title = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "RSVP Reader"
             textSize = 32f
             setTextColor(Color.rgb(20, 25, 35))
             gravity = Gravity.CENTER
-        }
-        root.addView(title, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        val subtitle = TextView(this).apply {
-            text = "いま画面に見えている文章をOCRし、\nその場で速読表示します。"
+        root.addView(TextView(this).apply {
+            text = "Kindleなどの本文を直接取得して速読します。\n取得できない画面だけOCRを使います。"
             textSize = 16f
             setTextColor(Color.DKGRAY)
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, dp(28))
-        }
-        root.addView(subtitle)
+        })
 
-        val overlayButton = Button(this).apply {
-            text = "1. 画面上への表示を許可"
+        root.addView(Button(this).apply {
+            text = "1. RSVP Readerを有効にする"
             textSize = 16f
-            setOnClickListener { openOverlayPermission() }
-        }
-        root.addView(overlayButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
             bottomMargin = dp(14)
         })
 
-        val captureButton = Button(this).apply {
-            text = "2. 画面キャプチャを開始"
+        root.addView(Button(this).apply {
+            text = "2. OCR補助を有効にする（推奨）"
             textSize = 16f
-            setOnClickListener { beginProjectionRequest() }
-        }
-        root.addView(captureButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+            setOnClickListener {
+                startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CAPTURE)
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
             bottomMargin = dp(22)
         })
 
@@ -88,55 +89,43 @@ class MainActivity : Activity() {
         }
         root.addView(status)
 
-        val help = TextView(this).apply {
-            text = "開始後はKindleなどへ戻り、画面右端の ▶ を押してください。\nOCRは端末内で処理します。"
+        root.addView(TextView(this).apply {
+            text = "Kindleへ戻ると画面右端に ▶ が表示されます。\n本文はAccessibilityから直接取得し、読了すると自動で次ページへ進みます。"
             textSize = 14f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
             setPadding(0, dp(24), 0, 0)
-        }
-        root.addView(help)
+        })
 
         return root
     }
 
     private fun refreshStatus() {
-        val overlayOk = Settings.canDrawOverlays(this)
-        status.text = if (overlayOk) {
-            "✓ フローティング表示の準備完了"
-        } else {
-            "先に「画面上への表示」を許可してください"
+        val accessibilityOk = isReaderAccessibilityEnabled()
+        status.text = buildString {
+            append(if (accessibilityOk) "✓ 本文直接取得：有効" else "△ 本文直接取得：未設定")
+            append("\n")
+            append(if (ocrReady) "✓ OCR補助：有効" else "OCR補助：この起動中は未設定")
         }
     }
 
-    private fun openOverlayPermission() {
-        if (Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "すでに許可されています", Toast.LENGTH_SHORT).show()
-            return
-        }
-        startActivity(
-            Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName")
-            )
-        )
-    }
-
-    private fun beginProjectionRequest() {
-        if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "先に画面上への表示を許可してください", Toast.LENGTH_LONG).show()
-            openOverlayPermission()
-            return
-        }
-        startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CAPTURE)
+    private fun isReaderAccessibilityEnabled(): Boolean {
+        val component = ComponentName(this, ReaderAccessibilityService::class.java)
+        val expected = component.flattenToString()
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ).orEmpty()
+        return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_CAPTURE) return
+
         if (resultCode != RESULT_OK || data == null) {
-            Toast.makeText(this, "画面キャプチャが許可されませんでした", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "OCR補助は有効になりませんでした", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -145,12 +134,16 @@ class MainActivity : Activity() {
             putExtra(CaptureService.EXTRA_RESULT_DATA, data)
         }
         startForegroundService(serviceIntent)
-        status.text = "✓ 実行中。Kindleへ戻って ▶ を押してください"
-        Toast.makeText(this, "RSVP Readerを開始しました", Toast.LENGTH_SHORT).show()
+        ocrReady = true
+        refreshStatus()
+        Toast.makeText(this, "OCR補助を有効にしました", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        if (
+            Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATION)
         }
     }
