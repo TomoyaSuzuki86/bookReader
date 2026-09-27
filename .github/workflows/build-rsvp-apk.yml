@@ -6,6 +6,11 @@ on:
     paths:
       - 'rsvp-reader/**'
       - '.github/workflows/build-rsvp-apk.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rsvp-reader/**'
+      - '.github/workflows/build-rsvp-apk.yml'
   workflow_dispatch:
 
 jobs:
