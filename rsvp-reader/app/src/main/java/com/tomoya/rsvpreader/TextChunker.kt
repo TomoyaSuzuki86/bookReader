@@ -7,10 +7,54 @@ object TextChunker {
     private val hardPunctuation = setOf('。', '！', '？', '!', '?')
     private val softPunctuation = setOf('、', '，', ',', '；', ';', '：', ':')
 
-    fun chunk(raw: String): List<String> {
-        val text = raw
+    fun normalizeSource(raw: String): String {
+        val collapsed = raw
             .replace(Regex("[\\t\\r\\n ]+"), " ")
             .trim()
+        if (collapsed.isBlank()) return ""
+
+        val out = StringBuilder()
+        for (i in collapsed.indices) {
+            val ch = collapsed[i]
+            if (ch != ' ') {
+                out.append(ch)
+                continue
+            }
+
+            val previous = out.lastOrNull()
+            val next = collapsed.getOrNull(i + 1)
+            if (previous == null || next == null) continue
+
+            // Kindle/OCR often exposes a visual line break as whitespace.
+            // For Japanese prose that whitespace is layout, not a word boundary.
+            if (shouldDropLayoutSpace(previous, next)) continue
+            if (out.lastOrNull() != ' ') out.append(' ')
+        }
+        return out.toString().trim()
+    }
+
+    fun stitchFragments(parts: List<String>): String {
+        val out = StringBuilder()
+        for (part in parts) {
+            val value = normalizeSource(part)
+            if (value.isBlank()) continue
+            if (out.isEmpty()) {
+                out.append(value)
+                continue
+            }
+
+            val previous = out.last()
+            val next = value.first()
+            if (!shouldDropLayoutSpace(previous, next) && needsLatinSpace(previous, next)) {
+                out.append(' ')
+            }
+            out.append(value)
+        }
+        return normalizeSource(out.toString())
+    }
+
+    fun chunk(raw: String): List<String> {
+        val text = normalizeSource(raw)
         if (text.isBlank()) return emptyList()
 
         val tokens = tokenize(text)
@@ -43,11 +87,15 @@ object TextChunker {
                 continue
             }
 
-            if (buffer.isNotEmpty() && buffer.length >= TARGET_CHUNK && buffer.length + token.length > MAX_CHUNK) {
+            if (
+                buffer.isNotEmpty() &&
+                buffer.length >= TARGET_CHUNK &&
+                buffer.length + token.length > MAX_CHUNK
+            ) {
                 flush()
             }
 
-            // Never cut a token in the middle. A long proper noun/URL is kept intact.
+            // BreakIterator decides word boundaries. Never cut a token by character count.
             buffer.append(token)
 
             if (buffer.length >= MAX_CHUNK) {
@@ -75,6 +123,29 @@ object TextChunker {
         }
         return result
     }
+
+    private fun shouldDropLayoutSpace(left: Char, right: Char): Boolean {
+        if (isJapanese(left) && isJapanese(right)) return true
+        if (isJapanese(left) && isClosingPunctuation(right)) return true
+        if (isOpeningPunctuation(left) && isJapanese(right)) return true
+        return false
+    }
+
+    private fun needsLatinSpace(left: Char, right: Char): Boolean =
+        (left.isLetterOrDigit() && right.isLetterOrDigit()) &&
+            !isJapanese(left) &&
+            !isJapanese(right)
+
+    private fun isJapanese(ch: Char): Boolean =
+        ch in '\u3040'..'\u30ff' ||
+            ch in '\u3400'..'\u9fff' ||
+            ch in '\uf900'..'\ufaff'
+
+    private fun isOpeningPunctuation(ch: Char): Boolean =
+        ch in setOf('「', '『', '（', '(', '【', '〈', '《', '［', '[')
+
+    private fun isClosingPunctuation(ch: Char): Boolean =
+        ch in setOf('。', '、', '！', '？', '」', '』', '）', ')', '】', '〉', '》', '］', ']', ',', '.', '!', '?', ':', ';')
 
     private fun isPunctuationOnly(value: String): Boolean =
         value.all { ch ->
