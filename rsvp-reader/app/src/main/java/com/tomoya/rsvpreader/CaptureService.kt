@@ -186,10 +186,10 @@ class CaptureService : Service() {
                 apiKey = apiKey,
                 onSuccess = { text ->
                     releaseBitmaps(bitmap, prepared)
-                    sendOcrResult(text, "Cloud Vision")
+                    sendOcrResult(text, "Cloud Vision", null)
                 },
-                onFailure = {
-                    runMlKit(bitmap, prepared)
+                onFailure = { error ->
+                    runMlKit(bitmap, prepared, error)
                 }
             )
         } else {
@@ -201,7 +201,7 @@ class CaptureService : Service() {
         bitmap: Bitmap,
         apiKey: String,
         onSuccess: (String) -> Unit,
-        onFailure: () -> Unit
+        onFailure: (String) -> Unit
     ) {
         networkExecutor.execute {
             try {
@@ -224,25 +224,15 @@ class CaptureService : Service() {
                                         )
                                     )
                                 )
-                                put(
-                                    "imageContext",
-                                    JSONObject().put(
-                                        "languageHints",
-                                        JSONArray().put("ja")
-                                    )
-                                )
+                                // Let Vision auto-detect the language.
                             }
                         )
                     )
                 }
 
-                val encodedKey = URLEncoder.encode(
-                    apiKey,
-                    StandardCharsets.UTF_8.name()
-                )
                 val connection = (
                     URL(
-                        "https://vision.googleapis.com/v1/images:annotate?key=$encodedKey"
+                        "https://vision.googleapis.com/v1/images:annotate"
                     ).openConnection() as HttpURLConnection
                 ).apply {
                     requestMethod = "POST"
@@ -252,6 +242,10 @@ class CaptureService : Service() {
                     setRequestProperty(
                         "Content-Type",
                         "application/json; charset=utf-8"
+                    )
+                    setRequestProperty(
+                        "x-goog-api-key",
+                        apiKey
                     )
                 }
 
@@ -276,8 +270,18 @@ class CaptureService : Service() {
 
                     if (status !in 200..299) {
                         throw IllegalStateException(
-                            "Cloud Vision HTTP $status"
+                            parseVisionError(
+                                status,
+                                responseText
+                            )
                         )
+                    }
+
+                    val responseError = parseVisionEmbeddedError(
+                        responseText
+                    )
+                    if (responseError != null) {
+                        throw IllegalStateException(responseError)
                     }
 
                     val text = parseCloudVisionText(responseText)
@@ -295,10 +299,74 @@ class CaptureService : Service() {
                 } finally {
                     connection.disconnect()
                 }
-            } catch (_: Throwable) {
-                mainHandler.post(onFailure)
+            } catch (t: Throwable) {
+                val message = t.message
+                    ?.take(220)
+                    ?.ifBlank { null }
+                    ?: t.javaClass.simpleName
+                mainHandler.post {
+                    onFailure(message)
+                }
             }
         }
+    }
+
+    private fun parseVisionEmbeddedError(
+        responseText: String
+    ): String? {
+        return runCatching {
+            val error = JSONObject(responseText)
+                .optJSONArray("responses")
+                ?.optJSONObject(0)
+                ?.optJSONObject("error")
+                ?: return@runCatching null
+
+            val code = error.optInt("code")
+            val status = error.optString("status")
+            val message = error.optString("message")
+
+            buildString {
+                append("Vision ")
+                if (code > 0) append(code)
+                if (status.isNotBlank()) {
+                    if (code > 0) append(" ")
+                    append(status)
+                }
+                if (message.isNotBlank()) {
+                    append(": ")
+                    append(message)
+                }
+            }.take(220)
+        }.getOrNull()
+    }
+
+    private fun parseVisionError(
+        httpStatus: Int,
+        responseText: String
+    ): String {
+        val apiMessage = runCatching {
+            val error = JSONObject(responseText)
+                .optJSONObject("error")
+            val status = error?.optString("status").orEmpty()
+            val message = error?.optString("message").orEmpty()
+            buildString {
+                append("Vision HTTP ")
+                append(httpStatus)
+                if (status.isNotBlank()) {
+                    append(" ")
+                    append(status)
+                }
+                if (message.isNotBlank()) {
+                    append(": ")
+                    append(message)
+                }
+            }
+        }.getOrNull()
+
+        return apiMessage
+            ?.takeIf { it.length > "Vision HTTP $httpStatus".length }
+            ?.take(220)
+            ?: "Vision HTTP $httpStatus"
     }
 
     private fun parseCloudVisionText(responseText: String): String {
@@ -338,7 +406,8 @@ class CaptureService : Service() {
 
     private fun runMlKit(
         original: Bitmap,
-        prepared: Bitmap
+        prepared: Bitmap,
+        visionError: String? = null
     ) {
         recognizer.process(
             InputImage.fromBitmap(prepared, 0)
@@ -350,11 +419,12 @@ class CaptureService : Service() {
                         imageWidth = prepared.width,
                         imageHeight = prepared.height
                     ),
-                    "ML Kit"
+                    "ML Kit",
+                    visionError
                 )
             }
             .addOnFailureListener {
-                sendOcrResult(null, "ML Kit")
+                sendOcrResult(null, "ML Kit", visionError)
             }
             .addOnCompleteListener {
                 releaseBitmaps(original, prepared)
@@ -480,13 +550,15 @@ class CaptureService : Service() {
 
     private fun sendOcrResult(
         text: String?,
-        source: String
+        source: String,
+        error: String? = null
     ) {
         sendBroadcast(
             Intent(ACTION_OCR_RESULT).apply {
                 setPackage(packageName)
                 putExtra(EXTRA_OCR_TEXT, text)
                 putExtra(EXTRA_OCR_SOURCE, source)
+                putExtra(EXTRA_OCR_ERROR, error)
             }
         )
     }
@@ -564,6 +636,7 @@ class CaptureService : Service() {
             "com.tomoya.rsvpreader.OCR_RESULT"
         const val EXTRA_OCR_TEXT = "ocr_text"
         const val EXTRA_OCR_SOURCE = "ocr_source"
+        const val EXTRA_OCR_ERROR = "ocr_error"
 
         private const val CHANNEL_ID = "rsvp_capture"
         private const val NOTIFICATION_ID = 4107
