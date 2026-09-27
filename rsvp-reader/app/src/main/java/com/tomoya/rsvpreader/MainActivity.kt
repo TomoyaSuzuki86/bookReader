@@ -10,9 +10,11 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -21,6 +23,7 @@ class MainActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var projectionManager: MediaProjectionManager
+    private lateinit var apiKeyInput: EditText
     private var ocrReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,7 +46,7 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28), dp(48), dp(28), dp(28))
+            setPadding(dp(28), dp(40), dp(28), dp(28))
             setBackgroundColor(Color.rgb(247, 248, 250))
         }
 
@@ -55,11 +58,11 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         root.addView(TextView(this).apply {
-            text = "Kindleなどの本文を直接取得して速読します。\n取得できない画面だけOCRを使います。"
+            text = "本文直接取得を優先し、取れない画面はCloud Vision OCRで読み取ります。"
             textSize = 16f
             setTextColor(Color.DKGRAY)
             gravity = Gravity.CENTER
-            setPadding(0, dp(12), 0, dp(28))
+            setPadding(0, dp(10), 0, dp(22))
         })
 
         root.addView(Button(this).apply {
@@ -69,17 +72,52 @@ class MainActivity : Activity() {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
-            bottomMargin = dp(14)
+            bottomMargin = dp(12)
+        })
+
+        apiKeyInput = EditText(this).apply {
+            hint = "Google Cloud Vision APIキー"
+            textSize = 15f
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(
+                getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+                    .getString(PREF_API_KEY, "")
+                    .orEmpty()
+            )
+        }
+        root.addView(apiKeyInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+            bottomMargin = dp(8)
         })
 
         root.addView(Button(this).apply {
-            text = "2. OCR補助を有効にする（推奨）"
+            text = "2. Cloud Vision APIキーを保存"
+            textSize = 15f
+            setOnClickListener {
+                val key = apiKeyInput.text.toString().trim()
+                getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putString(PREF_API_KEY, key)
+                    .apply()
+                refreshStatus()
+                Toast.makeText(
+                    this@MainActivity,
+                    if (key.isBlank()) "APIキーを削除しました" else "APIキーを保存しました",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)).apply {
+            bottomMargin = dp(12)
+        })
+
+        root.addView(Button(this).apply {
+            text = "3. 画面キャプチャを開始"
             textSize = 16f
             setOnClickListener {
                 startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CAPTURE)
             }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
-            bottomMargin = dp(22)
+            bottomMargin = dp(18)
         })
 
         status = TextView(this).apply {
@@ -90,11 +128,11 @@ class MainActivity : Activity() {
         root.addView(status)
 
         root.addView(TextView(this).apply {
-            text = "Kindleへ戻ると画面右端に ▶ が表示されます。\n本文はAccessibilityから直接取得します。\n読書画面内で自動ページ送りの左右方向も切り替えられます。"
+            text = "Cloud Visionが失敗した場合だけ端末内ML Kitへ自動フォールバックします。\nKindleへ戻ると右端に ▶ が表示されます。"
             textSize = 14f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
-            setPadding(0, dp(24), 0, 0)
+            setPadding(0, dp(20), 0, 0)
         })
 
         return root
@@ -102,10 +140,17 @@ class MainActivity : Activity() {
 
     private fun refreshStatus() {
         val accessibilityOk = isReaderAccessibilityEnabled()
+        val hasCloudKey = getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+            .getString(PREF_API_KEY, "")
+            .orEmpty()
+            .isNotBlank()
+
         status.text = buildString {
             append(if (accessibilityOk) "✓ 本文直接取得：有効" else "△ 本文直接取得：未設定")
             append("\n")
-            append(if (ocrReady) "✓ OCR補助：有効" else "OCR補助：この起動中は未設定")
+            append(if (hasCloudKey) "✓ Cloud Vision：設定済み" else "△ Cloud Vision：APIキー未設定")
+            append("\n")
+            append(if (ocrReady) "✓ 画面キャプチャ：有効" else "画面キャプチャ：この起動中は未設定")
         }
     }
 
@@ -125,7 +170,7 @@ class MainActivity : Activity() {
         if (requestCode != REQUEST_CAPTURE) return
 
         if (resultCode != RESULT_OK || data == null) {
-            Toast.makeText(this, "OCR補助は有効になりませんでした", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "画面キャプチャは有効になりませんでした", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -136,7 +181,7 @@ class MainActivity : Activity() {
         startForegroundService(serviceIntent)
         ocrReady = true
         refreshStatus()
-        Toast.makeText(this, "OCR補助を有効にしました", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "画面キャプチャを開始しました", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -149,6 +194,8 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        const val CLOUD_PREFS = "cloud_vision"
+        const val PREF_API_KEY = "api_key"
         private const val REQUEST_CAPTURE = 1001
         private const val REQUEST_NOTIFICATION = 1002
     }
