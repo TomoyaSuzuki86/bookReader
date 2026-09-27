@@ -696,7 +696,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         waitingForOcr = true
         pendingAfterPageTurn = afterPageTurn
         mainHandler.removeCallbacks(ocrTimeout)
-        mainHandler.postDelayed(ocrTimeout, 18_000)
+        mainHandler.postDelayed(ocrTimeout, 35_000)
 
         runCatching {
             startService(
