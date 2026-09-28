@@ -224,7 +224,13 @@ class CaptureService : Service() {
                                         )
                                     )
                                 )
-                                // Let Vision auto-detect the language.
+                                put(
+                                    "imageContext",
+                                    JSONObject().put(
+                                        "languageHints",
+                                        JSONArray().put("ja")
+                                    )
+                                )
                             }
                         )
                     )
