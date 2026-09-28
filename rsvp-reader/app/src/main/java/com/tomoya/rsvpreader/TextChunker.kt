@@ -16,9 +16,12 @@ object TextChunker {
     }
 
     fun normalizeSource(raw: String): String {
-        val collapsed = raw
+        val lineRepaired =
+            repairLayoutLineBreaks(raw)
+
+        val collapsed = lineRepaired
             .replace(
-                Regex("[\\t\\r\\n ]+"),
+                Regex("[\\t 　]+"),
                 " "
             )
             .trim()
@@ -601,12 +604,85 @@ object TextChunker {
             ch == '!' ||
             ch == '?'
 
+    private fun repairLayoutLineBreaks(
+        raw: String
+    ): String {
+        if (
+            !raw.contains('\n') &&
+            !raw.contains('\r')
+        ) {
+            return raw
+        }
+
+        val normalized =
+            raw.replace("\r\n", "\n")
+                .replace('\r', '\n')
+
+        val out = StringBuilder()
+        var index = 0
+
+        while (index < normalized.length) {
+            val ch = normalized[index]
+
+            if (ch != '\n') {
+                out.append(ch)
+                index++
+                continue
+            }
+
+            var nextIndex = index
+            while (
+                nextIndex < normalized.length &&
+                normalized[nextIndex] == '\n'
+            ) {
+                nextIndex++
+            }
+
+            val left =
+                out.lastOrNull {
+                    !it.isWhitespace()
+                }
+
+            val right =
+                normalized
+                    .drop(nextIndex)
+                    .firstOrNull {
+                        !it.isWhitespace()
+                    }
+
+            if (
+                left != null &&
+                right != null &&
+                isLatinLike(left) &&
+                isLatinLike(right)
+            ) {
+                if (
+                    out.lastOrNull() != ' '
+                ) {
+                    out.append(' ')
+                }
+            }
+            // Japanese line wrapping is visual layout only.
+            // Do not emit a separator.
+
+            index = nextIndex
+        }
+
+        return out.toString()
+    }
+
+    private fun isLatinLike(
+        ch: Char
+    ): Boolean =
+        ch.isLetterOrDigit() &&
+            !isJapanese(ch)
+
     private fun shouldDropLayoutSpace(
         left: Char,
         right: Char
     ): Boolean {
         if (
-            isJapanese(left) &&
+            isJapanese(left) ||
             isJapanese(right)
         ) {
             return true
