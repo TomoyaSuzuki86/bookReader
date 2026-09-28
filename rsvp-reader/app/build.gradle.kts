@@ -33,4 +33,5 @@ android {
 
 dependencies {
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
+    implementation("com.atilika.kuromoji:kuromoji-ipadic:0.9.0")
 }
