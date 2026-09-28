@@ -371,7 +371,10 @@ class CaptureService : Service() {
 
     private data class VisionWord(
         val text: String,
-        val glyphSize: Double
+        val glyphSize: Double,
+        val bounds: Rect,
+        val kanaRatio: Double,
+        val containsKanji: Boolean
     )
 
     private fun parseCloudVisionText(responseText: String): String {
@@ -446,21 +449,47 @@ class CaptureService : Service() {
                                         .orEmpty()
                                 )
                             }
-                        }
+                        }.trim()
 
                         if (text.isBlank()) continue
 
-                        val glyphSize = estimateGlyphSize(
-                            word.optJSONObject("boundingBox"),
-                            text
-                        )
+                        val bounds = boundingRect(
+                            word.optJSONObject("boundingBox")
+                        ) ?: continue
 
-                        if (glyphSize > 0.0) {
-                            words += VisionWord(
-                                text = text,
-                                glyphSize = glyphSize
-                            )
+                        val glyphSize =
+                            estimateGlyphSize(bounds, text)
+
+                        if (glyphSize <= 0.0) continue
+
+                        val readable = text.filter {
+                            it.isLetterOrDigit() ||
+                                it in '\u3040'..'\u30ff' ||
+                                it in '\u3400'..'\u9fff'
                         }
+
+                        if (readable.isBlank()) continue
+
+                        val kanaCount = readable.count {
+                            it in '\u3040'..'\u30ff'
+                        }
+
+                        val kanaRatio =
+                            kanaCount.toDouble() /
+                                readable.length.toDouble()
+
+                        val containsKanji =
+                            readable.any {
+                                it in '\u3400'..'\u9fff'
+                            }
+
+                        words += VisionWord(
+                            text = text,
+                            glyphSize = glyphSize,
+                            bounds = bounds,
+                            kanaRatio = kanaRatio,
+                            containsKanji = containsKanji
+                        )
                     }
                 }
             }
@@ -468,25 +497,28 @@ class CaptureService : Service() {
 
         if (words.isEmpty()) return ""
 
-        val medianGlyph = words
+        val sizes = words
             .map { it.glyphSize }
             .sorted()
-            .let { sizes ->
-                val middle = sizes.size / 2
-                if (sizes.size % 2 == 0) {
-                    (sizes[middle - 1] + sizes[middle]) / 2.0
-                } else {
-                    sizes[middle]
-                }
-            }
 
-        if (medianGlyph <= 0.0) return ""
+        val bodySize = sizes[
+            ((sizes.lastIndex) * BODY_SIZE_PERCENTILE)
+                .toInt()
+                .coerceIn(0, sizes.lastIndex)
+        ]
 
-        val kept = words.filterNot { word ->
+        if (bodySize <= 0.0) return ""
+
+        val bodyWords = words.filter {
+            it.glyphSize >= bodySize * BASE_WORD_MIN_RATIO &&
+                it.containsKanji
+        }
+
+        val kept = words.filterNot { candidate ->
             isLikelyRuby(
-                text = word.text,
-                glyphSize = word.glyphSize,
-                medianGlyph = medianGlyph
+                candidate = candidate,
+                bodySize = bodySize,
+                bodyWords = bodyWords
             )
         }
 
@@ -497,15 +529,14 @@ class CaptureService : Service() {
         )
     }
 
-    private fun estimateGlyphSize(
-        boundingBox: JSONObject?,
-        text: String
-    ): Double {
+    private fun boundingRect(
+        boundingBox: JSONObject?
+    ): Rect? {
         val vertices = boundingBox
             ?.optJSONArray("vertices")
-            ?: return 0.0
+            ?: return null
 
-        if (vertices.length() < 2) return 0.0
+        if (vertices.length() < 2) return null
 
         var minX = Int.MAX_VALUE
         var maxX = Int.MIN_VALUE
@@ -515,6 +546,7 @@ class CaptureService : Service() {
         for (i in 0 until vertices.length()) {
             val vertex = vertices.optJSONObject(i)
                 ?: continue
+
             val x = vertex.optInt("x", 0)
             val y = vertex.optInt("y", 0)
 
@@ -526,58 +558,147 @@ class CaptureService : Service() {
 
         if (
             minX == Int.MAX_VALUE ||
-            minY == Int.MAX_VALUE
+            minY == Int.MAX_VALUE ||
+            maxX <= minX ||
+            maxY <= minY
         ) {
-            return 0.0
+            return null
         }
 
-        val width = (maxX - minX)
-            .coerceAtLeast(1)
-            .toDouble()
-        val height = (maxY - minY)
-            .coerceAtLeast(1)
-            .toDouble()
+        return Rect(
+            minX,
+            minY,
+            maxX,
+            maxY
+        )
+    }
+
+    private fun estimateGlyphSize(
+        bounds: Rect,
+        text: String
+    ): Double {
         val count = text.count {
             it.isLetterOrDigit() ||
                 it in '\u3040'..'\u30ff' ||
                 it in '\u3400'..'\u9fff'
         }.coerceAtLeast(1).toDouble()
 
-        // Horizontal: width/count approximates one glyph.
-        // Vertical: height/count approximates one glyph.
-        // The larger of the two is stable for both writing directions.
         return maxOf(
-            width / count,
-            height / count
+            bounds.width().toDouble() / count,
+            bounds.height().toDouble() / count
         )
     }
 
     private fun isLikelyRuby(
-        text: String,
-        glyphSize: Double,
-        medianGlyph: Double
+        candidate: VisionWord,
+        bodySize: Double,
+        bodyWords: List<VisionWord>
     ): Boolean {
-        val readable = text.filter {
-            it.isLetterOrDigit() ||
-                it in '\u3040'..'\u30ff' ||
-                it in '\u3400'..'\u9fff'
+        if (candidate.kanaRatio < RUBY_KANA_RATIO) {
+            return false
         }
 
-        if (readable.length < 2) return false
-
-        val kanaCount = readable.count {
-            it in '\u3040'..'\u30ff'
+        if (
+            candidate.glyphSize >=
+                bodySize * RUBY_SIZE_RATIO
+        ) {
+            return false
         }
-        val kanaRatio =
-            kanaCount.toDouble() /
-                readable.length.toDouble()
 
-        val clearlySmaller =
-            glyphSize < medianGlyph * RUBY_SIZE_RATIO
+        val spatiallyAttached = bodyWords.any { base ->
+            if (base === candidate) return@any false
 
-        return clearlySmaller &&
-            kanaRatio >= RUBY_KANA_RATIO
+            isRubyAboveBase(
+                ruby = candidate.bounds,
+                base = base.bounds,
+                bodySize = bodySize
+            ) ||
+                isRubyBesideVerticalBase(
+                    ruby = candidate.bounds,
+                    base = base.bounds,
+                    bodySize = bodySize
+                )
+        }
+
+        if (spatiallyAttached) {
+            return true
+        }
+
+        // Some OCR responses separate single ruby glyphs from the base word.
+        // Only remove them without spatial confirmation when they are
+        // dramatically smaller than normal body text.
+        return candidate.glyphSize <
+            bodySize * EXTREME_RUBY_SIZE_RATIO
     }
+
+    private fun isRubyAboveBase(
+        ruby: Rect,
+        base: Rect,
+        bodySize: Double
+    ): Boolean {
+        val overlap = overlapLength(
+            ruby.left,
+            ruby.right,
+            base.left,
+            base.right
+        )
+
+        val minWidth = minOf(
+            ruby.width(),
+            base.width()
+        ).coerceAtLeast(1)
+
+        val overlapRatio =
+            overlap.toDouble() /
+                minWidth.toDouble()
+
+        val gap =
+            base.top - ruby.bottom
+
+        return overlapRatio >= RUBY_AXIS_OVERLAP_RATIO &&
+            gap >= -bodySize * 0.25 &&
+            gap <= bodySize * RUBY_MAX_GAP_RATIO
+    }
+
+    private fun isRubyBesideVerticalBase(
+        ruby: Rect,
+        base: Rect,
+        bodySize: Double
+    ): Boolean {
+        val overlap = overlapLength(
+            ruby.top,
+            ruby.bottom,
+            base.top,
+            base.bottom
+        )
+
+        val minHeight = minOf(
+            ruby.height(),
+            base.height()
+        ).coerceAtLeast(1)
+
+        val overlapRatio =
+            overlap.toDouble() /
+                minHeight.toDouble()
+
+        val gap =
+            ruby.left - base.right
+
+        return overlapRatio >= RUBY_AXIS_OVERLAP_RATIO &&
+            gap >= -bodySize * 0.25 &&
+            gap <= bodySize * RUBY_MAX_GAP_RATIO
+    }
+
+    private fun overlapLength(
+        aStart: Int,
+        aEnd: Int,
+        bStart: Int,
+        bEnd: Int
+    ): Int =
+        (
+            minOf(aEnd, bEnd) -
+                maxOf(aStart, bStart)
+            ).coerceAtLeast(0)
 
     private fun encodeJpegBase64(bitmap: Bitmap): String {
         val output = ByteArrayOutputStream()
@@ -832,7 +953,12 @@ class CaptureService : Service() {
         private const val CLOUD_CONNECT_TIMEOUT_MS = 8_000
         private const val CLOUD_READ_TIMEOUT_MS = 15_000
 
-        private const val RUBY_SIZE_RATIO = 0.68
-        private const val RUBY_KANA_RATIO = 0.75
+        private const val BODY_SIZE_PERCENTILE = 0.72
+        private const val BASE_WORD_MIN_RATIO = 0.82
+        private const val RUBY_SIZE_RATIO = 0.78
+        private const val EXTREME_RUBY_SIZE_RATIO = 0.50
+        private const val RUBY_KANA_RATIO = 0.60
+        private const val RUBY_AXIS_OVERLAP_RATIO = 0.22
+        private const val RUBY_MAX_GAP_RATIO = 1.35
     }
 }
