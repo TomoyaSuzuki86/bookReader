@@ -598,7 +598,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             index = index.coerceIn(0, chunks.lastIndex)
             word.text = chunks[index]
             progress.text = "${index + 1} / ${chunks.size}  ·  $source"
-            speedLabel.text = extra ?: "$speed 文字/分  ·  1語ずつ  ·  自動ページ送り"
+            speedLabel.text = extra ?: "$speed 文字/分  ·  文節表示  ·  自動ページ送り"
             refreshDirection()
         }
 
