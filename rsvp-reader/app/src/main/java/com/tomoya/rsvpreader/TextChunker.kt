@@ -1,20 +1,13 @@
 package com.tomoya.rsvpreader
 
-import android.icu.text.BreakIterator
-import java.util.Locale
+import com.atilika.kuromoji.ipadic.Token
+import com.atilika.kuromoji.ipadic.Tokenizer
 
 object TextChunker {
 
-    private val particles = setOf(
-        "は", "が", "を", "に", "へ", "で", "と", "も", "の",
-        "や", "か", "ね", "よ", "ぞ", "さ", "な", "から", "まで",
-        "より", "だけ", "ほど", "しか", "でも", "など", "って"
-    )
-
-    private val auxiliaries = setOf(
-        "です", "ます", "でした", "ません", "ない", "たい",
-        "た", "て", "だ", "いる", "ある", "なる"
-    )
+    private val tokenizer: Tokenizer by lazy {
+        Tokenizer()
+    }
 
     fun normalizeSource(raw: String): String {
         val collapsed = raw
@@ -79,64 +72,155 @@ object TextChunker {
     }
 
     /**
-     * RSVP display units.
+     * Japanese RSVP units are grammatical phrases, not arbitrary character
+     * slices. Kuromoji supplies morphological boundaries and POS tags.
      *
-     * The base unit is one ICU word. Japanese particles and short auxiliaries
-     * are attached to the previous lexical word so they are not flashed alone.
-     * Punctuation is also attached to the preceding unit.
+     * Examples:
+     *   私 / は / 本 / を / 読ん / で / いる
+     * becomes:
+     *   私は / 本を / 読んでいる
      */
     fun chunk(raw: String): List<String> {
         val text = normalizeSource(raw)
         if (text.isBlank()) return emptyList()
 
-        val tokens = tokenize(text)
+        val tokens = runCatching {
+            tokenizer.tokenize(text)
+        }.getOrElse {
+            return fallbackByPunctuation(text)
+        }
+
         if (tokens.isEmpty()) return emptyList()
 
         val units = mutableListOf<String>()
+        val current = StringBuilder()
         val prefix = StringBuilder()
+        var currentHeadPos = ""
+
+        fun flush() {
+            val value = current.toString().trim()
+            if (value.isNotEmpty()) {
+                units += value
+            }
+            current.clear()
+            currentHeadPos = ""
+        }
+
+        fun startContent(token: Token) {
+            if (prefix.isNotEmpty()) {
+                current.append(prefix)
+                prefix.clear()
+            }
+            current.append(token.surface)
+            currentHeadPos = token.partOfSpeechLevel1
+        }
 
         for (token in tokens) {
-            val value = token.trim()
-            if (value.isBlank()) continue
+            val surface = token.surface
+            if (surface.isBlank()) continue
 
-            if (isPunctuationOnly(value)) {
-                if (isOpeningPunctuationOnly(value)) {
-                    prefix.append(value)
-                } else if (units.isNotEmpty()) {
-                    units[units.lastIndex] =
-                        units.last() + value
+            val pos1 = token.partOfSpeechLevel1
+            val pos2 = token.partOfSpeechLevel2
+
+            if (pos1 == "記号") {
+                val opening = surface.all { isOpeningPunctuation(it) }
+
+                if (opening) {
+                    if (current.isNotEmpty()) {
+                        flush()
+                    }
+                    prefix.append(surface)
                 } else {
-                    prefix.append(value)
+                    if (current.isNotEmpty()) {
+                        current.append(surface)
+                    } else if (units.isNotEmpty()) {
+                        units[units.lastIndex] =
+                            units.last() + surface
+                    } else {
+                        prefix.append(surface)
+                    }
+
+                    if (
+                        surface.any {
+                            it == '。' ||
+                                it == '！' ||
+                                it == '？' ||
+                                it == '!' ||
+                                it == '?'
+                        }
+                    ) {
+                        flush()
+                    }
                 }
                 continue
             }
 
-            val word = prefix.toString() + value
-            prefix.clear()
+            if (pos1 == "接頭詞") {
+                if (current.isNotEmpty()) {
+                    flush()
+                }
+                prefix.append(surface)
+                continue
+            }
 
-            val attachToPrevious =
-                units.isNotEmpty() &&
-                (value in particles || value in auxiliaries) &&
-                visibleCharCount(units.last() + word) <= MAX_ATTACHED_CHARS
+            val functionWord =
+                pos1 == "助詞" ||
+                    pos1 == "助動詞" ||
+                    pos1 == "フィラー"
 
-            if (attachToPrevious) {
-                units[units.lastIndex] =
-                    units.last() + word
+            val dependentContent =
+                pos2 == "非自立" ||
+                    pos2 == "接尾" ||
+                    pos1 == "接尾詞"
+
+            if (functionWord || dependentContent) {
+                if (current.isNotEmpty()) {
+                    current.append(surface)
+                } else if (units.isNotEmpty()) {
+                    units[units.lastIndex] =
+                        units.last() + surface
+                } else {
+                    current.append(surface)
+                }
+                continue
+            }
+
+            if (current.isEmpty()) {
+                startContent(token)
+                continue
+            }
+
+            val mergeCompoundNoun =
+                currentHeadPos == "名詞" &&
+                    pos1 == "名詞" &&
+                    visibleCharCount(
+                        current.toString() + surface
+                    ) <= MAX_COMPOUND_CHARS
+
+            if (mergeCompoundNoun) {
+                current.append(surface)
             } else {
-                units += word
+                flush()
+                startContent(token)
             }
         }
 
         if (prefix.isNotEmpty()) {
-            if (units.isNotEmpty()) {
+            if (current.isNotEmpty()) {
+                current.append(prefix)
+            } else if (units.isNotEmpty()) {
                 units[units.lastIndex] =
                     units.last() + prefix.toString()
             } else {
-                units += prefix.toString()
+                current.append(prefix)
             }
         }
 
-        return units.filter { visibleCharCount(it) > 0 }
+        flush()
+
+        return units
+            .map { it.trim() }
+            .filter { visibleCharCount(it) > 0 }
     }
 
     fun visibleCharCount(value: String): Int =
@@ -163,27 +247,33 @@ object TextChunker {
             else -> 0L
         }
 
-    private fun tokenize(text: String): List<String> {
-        val iterator =
-            BreakIterator.getWordInstance(Locale.JAPANESE)
-
-        iterator.setText(text)
-
+    private fun fallbackByPunctuation(
+        text: String
+    ): List<String> {
         val result = mutableListOf<String>()
+        val current = StringBuilder()
 
-        var start = iterator.first()
-        var end = iterator.next()
+        for (ch in text) {
+            current.append(ch)
 
-        while (end != BreakIterator.DONE) {
-            val piece = text.substring(start, end)
-
-            if (piece.isNotBlank()) {
-                result += piece
+            if (
+                ch == '。' ||
+                ch == '、' ||
+                ch == '！' ||
+                ch == '？' ||
+                ch == '!' ||
+                ch == '?'
+            ) {
+                val value = current.toString().trim()
+                if (value.isNotEmpty()) {
+                    result += value
+                }
+                current.clear()
             }
-
-            start = end
-            end = iterator.next()
         }
+
+        val tail = current.toString().trim()
+        if (tail.isNotEmpty()) result += tail
 
         return result
     }
@@ -233,11 +323,6 @@ object TextChunker {
             '【', '〈', '《', '［', '['
         )
 
-    private fun isOpeningPunctuationOnly(
-        value: String
-    ): Boolean =
-        value.all { isOpeningPunctuation(it) }
-
     private fun isClosingPunctuation(ch: Char): Boolean =
         ch in setOf(
             '。', '、', '！', '？',
@@ -246,13 +331,5 @@ object TextChunker {
             ',', '.', '!', '?', ':', ';'
         )
 
-    private fun isPunctuationOnly(
-        value: String
-    ): Boolean =
-        value.all { ch ->
-            !ch.isLetterOrDigit() &&
-                !isJapanese(ch)
-        }
-
-    private const val MAX_ATTACHED_CHARS = 8
+    private const val MAX_COMPOUND_CHARS = 8
 }
