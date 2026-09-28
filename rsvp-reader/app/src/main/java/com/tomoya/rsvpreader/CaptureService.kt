@@ -205,7 +205,7 @@ class CaptureService : Service() {
     ) {
         networkExecutor.execute {
             try {
-                val encoded = encodeJpegBase64(bitmap)
+                val encoded = encodePngBase64(bitmap)
                 val request = JSONObject().apply {
                     put(
                         "requests",
@@ -625,16 +625,17 @@ class CaptureService : Service() {
         when (type) {
             "SPACE",
             "SURE_SPACE" -> {
+                // Keep only a provisional separator. TextChunker removes
+                // layout spaces around Japanese text before tokenization.
                 output.append(' ')
             }
 
             "EOL_SURE_SPACE",
-            "LINE_BREAK" -> {
-                output.append('\n')
-            }
-
+            "LINE_BREAK",
             "HYPHEN" -> {
-                output.append('-')
+                // These are layout/line-wrap signals, not semantic word
+                // boundaries for RSVP. In particular, Vision's HYPHEN
+                // denotes an end-line hyphen not present in the source text.
             }
         }
     }
@@ -887,11 +888,13 @@ class CaptureService : Service() {
             !isKana(ch) &&
             !isKanji(ch)
 
-    private fun encodeJpegBase64(bitmap: Bitmap): String {
+    private fun encodePngBase64(
+        bitmap: Bitmap
+    ): String {
         val output = ByteArrayOutputStream()
         bitmap.compress(
-            Bitmap.CompressFormat.JPEG,
-            CLOUD_JPEG_QUALITY,
+            Bitmap.CompressFormat.PNG,
+            100,
             output
         )
         return Base64.encodeToString(
@@ -939,36 +942,34 @@ class CaptureService : Service() {
         }
     }
 
-    private fun prepareForOcr(source: Bitmap): Bitmap {
-        val top = (source.height * 0.035f).toInt()
-        val bottom = (source.height * 0.965f).toInt()
-        val cropHeight = (bottom - top).coerceAtLeast(1)
+    private fun prepareForOcr(
+        source: Bitmap
+    ): Bitmap {
+        val top =
+            (source.height * 0.035f)
+                .toInt()
+        val bottom =
+            (source.height * 0.965f)
+                .toInt()
+        val safeTop =
+            top.coerceAtLeast(0)
+        val cropHeight =
+            (bottom - safeTop)
+                .coerceAtLeast(1)
+                .coerceAtMost(
+                    source.height -
+                        safeTop
+                )
 
-        val cropped = Bitmap.createBitmap(
+        // Keep the screenshot at native resolution. Artificial upscaling
+        // can soften thin Japanese strokes and does not add source detail.
+        return Bitmap.createBitmap(
             source,
             0,
-            top.coerceAtLeast(0),
+            safeTop,
             source.width,
-            cropHeight.coerceAtMost(
-                source.height - top.coerceAtLeast(0)
-            )
+            cropHeight
         )
-
-        val scale = minOf(
-            1.6f,
-            1800f / cropped.width.toFloat()
-        ).coerceAtLeast(1f)
-
-        if (scale <= 1.01f) return cropped
-
-        val scaled = Bitmap.createScaledBitmap(
-            cropped,
-            (cropped.width * scale).toInt(),
-            (cropped.height * scale).toInt(),
-            true
-        )
-        if (scaled !== cropped) cropped.recycle()
-        return scaled
     }
 
     private fun extractReadingText(
@@ -1136,7 +1137,6 @@ class CaptureService : Service() {
 
         private const val CHANNEL_ID = "rsvp_capture"
         private const val NOTIFICATION_ID = 4107
-        private const val CLOUD_JPEG_QUALITY = 88
         private const val CLOUD_CONNECT_TIMEOUT_MS = 8_000
         private const val CLOUD_READ_TIMEOUT_MS = 15_000
 
