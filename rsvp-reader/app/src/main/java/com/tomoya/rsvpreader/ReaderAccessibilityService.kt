@@ -44,6 +44,7 @@ class ReaderAccessibilityService : AccessibilityService() {
     private var lastPageText = ""
     private var waitingForOcr = false
     private var pendingAfterPageTurn = false
+    private var preferOcrSession = false
 
     private val ocrReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -347,13 +348,35 @@ class ReaderAccessibilityService : AccessibilityService() {
         if (readerOverlay != null || waitingForOcr) return
         bubble?.visibility = View.GONE
 
+        val hasCloudVisionKey =
+            getSharedPreferences(
+                MainActivity.CLOUD_PREFS,
+                Context.MODE_PRIVATE
+            ).getString(
+                MainActivity.PREF_API_KEY,
+                ""
+            ).orEmpty().isNotBlank()
+
+        preferOcrSession = hasCloudVisionKey
+
         mainHandler.postDelayed({
+            if (preferOcrSession) {
+                requestOcrFallback(
+                    afterPageTurn = false
+                )
+                return@postDelayed
+            }
+
             val text = extractCurrentPageText()
+
             if (text.length >= MIN_TEXT_LENGTH) {
                 pendingAfterPageTurn = false
                 startPage(text, "本文")
             } else {
-                requestOcrFallback(afterPageTurn = false)
+                preferOcrSession = true
+                requestOcrFallback(
+                    afterPageTurn = false
+                )
             }
         }, 120)
     }
@@ -760,10 +783,21 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         mainHandler.postDelayed({
             dispatchPageGesture(swipeLeft) {
-                waitForNewPage(
-                    attempt = 0,
-                    allowSemanticFallback = true
-                )
+                if (preferOcrSession) {
+                    mainHandler.postDelayed(
+                        {
+                            requestOcrFallback(
+                                afterPageTurn = true
+                            )
+                        },
+                        PAGE_TURN_OCR_DELAY_MS
+                    )
+                } else {
+                    waitForNewPage(
+                        attempt = 0,
+                        allowSemanticFallback = true
+                    )
+                }
             }
         }, 100)
     }
@@ -913,6 +947,7 @@ class ReaderAccessibilityService : AccessibilityService() {
     private fun closeReader() {
         waitingForOcr = false
         pendingAfterPageTurn = false
+        preferOcrSession = false
         mainHandler.removeCallbacksAndMessages(null)
         removeReaderOverlay()
         bubble?.visibility = View.VISIBLE
@@ -921,6 +956,7 @@ class ReaderAccessibilityService : AccessibilityService() {
     private fun finishWithMessage(message: String) {
         waitingForOcr = false
         pendingAfterPageTurn = false
+        preferOcrSession = false
         removeReaderOverlay()
         bubble?.visibility = View.VISIBLE
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
@@ -954,5 +990,6 @@ class ReaderAccessibilityService : AccessibilityService() {
         private const val MIN_FLASH_MS = 70L
         private const val MAX_FLASH_MS = 1400L
         private const val TRASH_ZONE_START_RATIO = 0.78f
+        private const val PAGE_TURN_OCR_DELAY_MS = 650L
     }
 }
