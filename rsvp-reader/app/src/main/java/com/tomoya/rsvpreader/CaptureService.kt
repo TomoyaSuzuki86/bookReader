@@ -369,23 +369,32 @@ class CaptureService : Service() {
             ?: "Vision HTTP $httpStatus"
     }
 
-    private data class VisionWord(
+    private data class VisionGlyph(
         val text: String,
-        val glyphSize: Double,
         val bounds: Rect,
-        val kanaRatio: Double,
-        val containsKanji: Boolean
+        val size: Double,
+        val isKana: Boolean,
+        val isKanji: Boolean,
+        val isPunctuation: Boolean,
+        val breakAfter: String?
     )
 
-    private fun parseCloudVisionText(responseText: String): String {
+    private fun parseCloudVisionText(
+        responseText: String
+    ): String {
         val root = JSONObject(responseText)
-        val response = root.optJSONArray("responses")
+        val response = root
+            .optJSONArray("responses")
             ?.optJSONObject(0)
             ?: return ""
 
         if (response.has("error")) return ""
 
-        val full = response.optJSONObject("fullTextAnnotation")
+        val full =
+            response.optJSONObject(
+                "fullTextAnnotation"
+            )
+
         val filtered = full?.let {
             extractVisionTextWithoutRuby(it)
         }.orEmpty()
@@ -412,143 +421,308 @@ class CaptureService : Service() {
     private fun extractVisionTextWithoutRuby(
         full: JSONObject
     ): String {
-        val pages = full.optJSONArray("pages")
-            ?: return ""
+        val pages =
+            full.optJSONArray("pages")
+                ?: return ""
 
-        val words = mutableListOf<VisionWord>()
+        val glyphs =
+            mutableListOf<VisionGlyph>()
 
-        for (pageIndex in 0 until pages.length()) {
-            val page = pages.optJSONObject(pageIndex)
-                ?: continue
-            val blocks = page.optJSONArray("blocks")
-                ?: continue
+        for (
+            pageIndex in
+            0 until pages.length()
+        ) {
+            val page =
+                pages.optJSONObject(
+                    pageIndex
+                ) ?: continue
 
-            for (blockIndex in 0 until blocks.length()) {
-                val block = blocks.optJSONObject(blockIndex)
+            val blocks =
+                page.optJSONArray("blocks")
                     ?: continue
-                val paragraphs = block.optJSONArray("paragraphs")
-                    ?: continue
 
-                for (paragraphIndex in 0 until paragraphs.length()) {
-                    val paragraph = paragraphs.optJSONObject(paragraphIndex)
-                        ?: continue
-                    val paragraphWords = paragraph.optJSONArray("words")
-                        ?: continue
+            for (
+                blockIndex in
+                0 until blocks.length()
+            ) {
+                val block =
+                    blocks.optJSONObject(
+                        blockIndex
+                    ) ?: continue
 
-                    for (wordIndex in 0 until paragraphWords.length()) {
-                        val word = paragraphWords.optJSONObject(wordIndex)
-                            ?: continue
-                        val symbols = word.optJSONArray("symbols")
-                            ?: continue
+                val paragraphs =
+                    block.optJSONArray(
+                        "paragraphs"
+                    ) ?: continue
 
-                        val text = buildString {
-                            for (symbolIndex in 0 until symbols.length()) {
-                                append(
-                                    symbols.optJSONObject(symbolIndex)
-                                        ?.optString("text")
-                                        .orEmpty()
-                                )
-                            }
-                        }.trim()
-
-                        if (text.isBlank()) continue
-
-                        val bounds = boundingRect(
-                            word.optJSONObject("boundingBox")
+                for (
+                    paragraphIndex in
+                    0 until paragraphs.length()
+                ) {
+                    val paragraph =
+                        paragraphs.optJSONObject(
+                            paragraphIndex
                         ) ?: continue
 
-                        val glyphSize =
-                            estimateGlyphSize(bounds, text)
+                    val words =
+                        paragraph.optJSONArray(
+                            "words"
+                        ) ?: continue
 
-                        if (glyphSize <= 0.0) continue
+                    for (
+                        wordIndex in
+                        0 until words.length()
+                    ) {
+                        val word =
+                            words.optJSONObject(
+                                wordIndex
+                            ) ?: continue
 
-                        val readable = text.filter {
-                            it.isLetterOrDigit() ||
-                                it in '\u3040'..'\u30ff' ||
-                                it in '\u3400'..'\u9fff'
-                        }
+                        val symbols =
+                            word.optJSONArray(
+                                "symbols"
+                            ) ?: continue
 
-                        if (readable.isBlank()) continue
+                        for (
+                            symbolIndex in
+                            0 until symbols.length()
+                        ) {
+                            val symbol =
+                                symbols.optJSONObject(
+                                    symbolIndex
+                                ) ?: continue
 
-                        val kanaCount = readable.count {
-                            it in '\u3040'..'\u30ff'
-                        }
+                            val text =
+                                symbol.optString(
+                                    "text"
+                                )
 
-                        val kanaRatio =
-                            kanaCount.toDouble() /
-                                readable.length.toDouble()
-
-                        val containsKanji =
-                            readable.any {
-                                it in '\u3400'..'\u9fff'
+                            if (text.isBlank()) {
+                                continue
                             }
 
-                        words += VisionWord(
-                            text = text,
-                            glyphSize = glyphSize,
-                            bounds = bounds,
-                            kanaRatio = kanaRatio,
-                            containsKanji = containsKanji
-                        )
+                            val bounds =
+                                boundingRect(
+                                    symbol.optJSONObject(
+                                        "boundingBox"
+                                    )
+                                ) ?: continue
+
+                            val size =
+                                estimateSymbolSize(
+                                    bounds
+                                )
+
+                            if (size <= 0.0) {
+                                continue
+                            }
+
+                            val ch =
+                                text.firstOrNull()
+                                    ?: continue
+
+                            glyphs +=
+                                VisionGlyph(
+                                    text = text,
+                                    bounds = bounds,
+                                    size = size,
+                                    isKana =
+                                        isKana(ch),
+                                    isKanji =
+                                        isKanji(ch),
+                                    isPunctuation =
+                                        isPunctuation(
+                                            ch
+                                        ),
+                                    breakAfter =
+                                        detectedBreak(
+                                            symbol
+                                        )
+                                )
+                        }
                     }
                 }
             }
         }
 
-        if (words.isEmpty()) return ""
-
-        val sizes = words
-            .map { it.glyphSize }
-            .sorted()
-
-        val bodySize = sizes[
-            ((sizes.lastIndex) * BODY_SIZE_PERCENTILE)
-                .toInt()
-                .coerceIn(0, sizes.lastIndex)
-        ]
-
-        if (bodySize <= 0.0) return ""
-
-        val bodyWords = words.filter {
-            it.glyphSize >= bodySize * BASE_WORD_MIN_RATIO &&
-                it.containsKanji
+        if (glyphs.isEmpty()) {
+            return ""
         }
 
-        val kept = words.filterNot { candidate ->
-            isLikelyRuby(
-                candidate = candidate,
-                bodySize = bodySize,
-                bodyWords = bodyWords
+        val textGlyphSizes =
+            glyphs
+                .filterNot {
+                    it.isPunctuation
+                }
+                .map { it.size }
+                .filter { it > 0.0 }
+                .sorted()
+
+        if (textGlyphSizes.isEmpty()) {
+            return ""
+        }
+
+        val bodySize =
+            percentile(
+                textGlyphSizes,
+                BODY_SIZE_PERCENTILE
             )
+
+        val kanjiBody =
+            glyphs.filter {
+                it.isKanji &&
+                    it.size >=
+                        bodySize *
+                            BASE_GLYPH_MIN_RATIO
+            }
+
+        val output =
+            StringBuilder()
+
+        for (glyph in glyphs) {
+            val removeAsRuby =
+                isRubyGlyph(
+                    candidate = glyph,
+                    bodySize = bodySize,
+                    kanjiBody = kanjiBody
+                )
+
+            if (!removeAsRuby) {
+                output.append(
+                    glyph.text
+                )
+
+                appendDetectedBreak(
+                    output,
+                    glyph.breakAfter
+                )
+            }
         }
 
-        if (kept.isEmpty()) return ""
+        return TextChunker
+            .normalizeSource(
+                output.toString()
+            )
+    }
 
-        return TextChunker.stitchFragments(
-            kept.map { it.text }
-        )
+    private fun detectedBreak(
+        symbol: JSONObject
+    ): String? =
+        symbol
+            .optJSONObject("property")
+            ?.optJSONObject(
+                "detectedBreak"
+            )
+            ?.optString("type")
+            ?.takeIf {
+                it.isNotBlank()
+            }
+
+    private fun appendDetectedBreak(
+        output: StringBuilder,
+        type: String?
+    ) {
+        when (type) {
+            "SPACE",
+            "SURE_SPACE" -> {
+                output.append(' ')
+            }
+
+            "EOL_SURE_SPACE",
+            "LINE_BREAK" -> {
+                output.append('\n')
+            }
+
+            "HYPHEN" -> {
+                output.append('-')
+            }
+        }
+    }
+
+    private fun isRubyGlyph(
+        candidate: VisionGlyph,
+        bodySize: Double,
+        kanjiBody: List<VisionGlyph>
+    ): Boolean {
+        // Never delete punctuation. This also fixes the v0.7
+        // regression where punctuation-only Vision words vanished.
+        if (candidate.isPunctuation) {
+            return false
+        }
+
+        if (!candidate.isKana) {
+            return false
+        }
+
+        if (
+            candidate.size >=
+                bodySize *
+                    RUBY_SIZE_RATIO
+        ) {
+            return false
+        }
+
+        val attachedToKanji =
+            kanjiBody.any { base ->
+                isRubyAboveBase(
+                    ruby =
+                        candidate.bounds,
+                    base =
+                        base.bounds,
+                    bodySize =
+                        bodySize
+                ) ||
+                    isRubyBesideVerticalBase(
+                        ruby =
+                            candidate.bounds,
+                        base =
+                            base.bounds,
+                        bodySize =
+                            bodySize
+                    )
+            }
+
+        if (attachedToKanji) {
+            return true
+        }
+
+        // Handles Vision responses where each ruby glyph is
+        // detached into its own tiny OCR element.
+        return candidate.size <
+            bodySize *
+                EXTREME_RUBY_SIZE_RATIO
     }
 
     private fun boundingRect(
         boundingBox: JSONObject?
     ): Rect? {
-        val vertices = boundingBox
-            ?.optJSONArray("vertices")
-            ?: return null
+        val vertices =
+            boundingBox
+                ?.optJSONArray("vertices")
+                ?: return null
 
-        if (vertices.length() < 2) return null
+        if (vertices.length() < 2) {
+            return null
+        }
 
         var minX = Int.MAX_VALUE
         var maxX = Int.MIN_VALUE
         var minY = Int.MAX_VALUE
         var maxY = Int.MIN_VALUE
 
-        for (i in 0 until vertices.length()) {
-            val vertex = vertices.optJSONObject(i)
-                ?: continue
+        for (
+            i in
+            0 until vertices.length()
+        ) {
+            val vertex =
+                vertices.optJSONObject(i)
+                    ?: continue
 
-            val x = vertex.optInt("x", 0)
-            val y = vertex.optInt("y", 0)
+            val x =
+                vertex.optInt("x", 0)
+
+            val y =
+                vertex.optInt("y", 0)
 
             minX = minOf(minX, x)
             maxX = maxOf(maxX, x)
@@ -573,62 +747,36 @@ class CaptureService : Service() {
         )
     }
 
-    private fun estimateGlyphSize(
-        bounds: Rect,
-        text: String
-    ): Double {
-        val count = text.count {
-            it.isLetterOrDigit() ||
-                it in '\u3040'..'\u30ff' ||
-                it in '\u3400'..'\u9fff'
-        }.coerceAtLeast(1).toDouble()
-
-        return maxOf(
-            bounds.width().toDouble() / count,
-            bounds.height().toDouble() / count
+    private fun estimateSymbolSize(
+        bounds: Rect
+    ): Double =
+        minOf(
+            bounds.width(),
+            bounds.height()
         )
-    }
+            .coerceAtLeast(1)
+            .toDouble()
 
-    private fun isLikelyRuby(
-        candidate: VisionWord,
-        bodySize: Double,
-        bodyWords: List<VisionWord>
-    ): Boolean {
-        if (candidate.kanaRatio < RUBY_KANA_RATIO) {
-            return false
+    private fun percentile(
+        values: List<Double>,
+        position: Double
+    ): Double {
+        if (values.isEmpty()) {
+            return 0.0
         }
 
-        if (
-            candidate.glyphSize >=
-                bodySize * RUBY_SIZE_RATIO
-        ) {
-            return false
-        }
-
-        val spatiallyAttached = bodyWords.any { base ->
-            if (base === candidate) return@any false
-
-            isRubyAboveBase(
-                ruby = candidate.bounds,
-                base = base.bounds,
-                bodySize = bodySize
-            ) ||
-                isRubyBesideVerticalBase(
-                    ruby = candidate.bounds,
-                    base = base.bounds,
-                    bodySize = bodySize
+        val index =
+            (
+                values.lastIndex *
+                    position
                 )
-        }
+                .toInt()
+                .coerceIn(
+                    0,
+                    values.lastIndex
+                )
 
-        if (spatiallyAttached) {
-            return true
-        }
-
-        // Some OCR responses separate single ruby glyphs from the base word.
-        // Only remove them without spatial confirmation when they are
-        // dramatically smaller than normal body text.
-        return candidate.glyphSize <
-            bodySize * EXTREME_RUBY_SIZE_RATIO
+        return values[index]
     }
 
     private fun isRubyAboveBase(
@@ -636,28 +784,36 @@ class CaptureService : Service() {
         base: Rect,
         bodySize: Double
     ): Boolean {
-        val overlap = overlapLength(
-            ruby.left,
-            ruby.right,
-            base.left,
-            base.right
-        )
+        val overlap =
+            overlapLength(
+                ruby.left,
+                ruby.right,
+                base.left,
+                base.right
+            )
 
-        val minWidth = minOf(
-            ruby.width(),
-            base.width()
-        ).coerceAtLeast(1)
+        val minWidth =
+            minOf(
+                ruby.width(),
+                base.width()
+            ).coerceAtLeast(1)
 
         val overlapRatio =
             overlap.toDouble() /
                 minWidth.toDouble()
 
         val gap =
-            base.top - ruby.bottom
+            base.top -
+                ruby.bottom
 
-        return overlapRatio >= RUBY_AXIS_OVERLAP_RATIO &&
-            gap >= -bodySize * 0.25 &&
-            gap <= bodySize * RUBY_MAX_GAP_RATIO
+        return overlapRatio >=
+            RUBY_AXIS_OVERLAP_RATIO &&
+            gap >=
+                -bodySize *
+                    0.30 &&
+            gap <=
+                bodySize *
+                    RUBY_MAX_GAP_RATIO
     }
 
     private fun isRubyBesideVerticalBase(
@@ -665,28 +821,38 @@ class CaptureService : Service() {
         base: Rect,
         bodySize: Double
     ): Boolean {
-        val overlap = overlapLength(
-            ruby.top,
-            ruby.bottom,
-            base.top,
-            base.bottom
-        )
+        val overlap =
+            overlapLength(
+                ruby.top,
+                ruby.bottom,
+                base.top,
+                base.bottom
+            )
 
-        val minHeight = minOf(
-            ruby.height(),
-            base.height()
-        ).coerceAtLeast(1)
+        val minHeight =
+            minOf(
+                ruby.height(),
+                base.height()
+            ).coerceAtLeast(1)
 
         val overlapRatio =
             overlap.toDouble() /
                 minHeight.toDouble()
 
+        // Kindle vertical text normally places ruby to the
+        // right of its base text.
         val gap =
-            ruby.left - base.right
+            ruby.left -
+                base.right
 
-        return overlapRatio >= RUBY_AXIS_OVERLAP_RATIO &&
-            gap >= -bodySize * 0.25 &&
-            gap <= bodySize * RUBY_MAX_GAP_RATIO
+        return overlapRatio >=
+            RUBY_AXIS_OVERLAP_RATIO &&
+            gap >=
+                -bodySize *
+                    0.30 &&
+            gap <=
+                bodySize *
+                    RUBY_MAX_GAP_RATIO
     }
 
     private fun overlapLength(
@@ -697,8 +863,29 @@ class CaptureService : Service() {
     ): Int =
         (
             minOf(aEnd, bEnd) -
-                maxOf(aStart, bStart)
+                maxOf(
+                    aStart,
+                    bStart
+                )
             ).coerceAtLeast(0)
+
+    private fun isKana(
+        ch: Char
+    ): Boolean =
+        ch in '\u3040'..'\u30ff'
+
+    private fun isKanji(
+        ch: Char
+    ): Boolean =
+        ch in '\u3400'..'\u9fff' ||
+            ch in '\uf900'..'\ufaff'
+
+    private fun isPunctuation(
+        ch: Char
+    ): Boolean =
+        !ch.isLetterOrDigit() &&
+            !isKana(ch) &&
+            !isKanji(ch)
 
     private fun encodeJpegBase64(bitmap: Bitmap): String {
         val output = ByteArrayOutputStream()
@@ -953,12 +1140,11 @@ class CaptureService : Service() {
         private const val CLOUD_CONNECT_TIMEOUT_MS = 8_000
         private const val CLOUD_READ_TIMEOUT_MS = 15_000
 
-        private const val BODY_SIZE_PERCENTILE = 0.72
-        private const val BASE_WORD_MIN_RATIO = 0.82
-        private const val RUBY_SIZE_RATIO = 0.78
-        private const val EXTREME_RUBY_SIZE_RATIO = 0.50
-        private const val RUBY_KANA_RATIO = 0.60
-        private const val RUBY_AXIS_OVERLAP_RATIO = 0.22
-        private const val RUBY_MAX_GAP_RATIO = 1.35
+        private const val BODY_SIZE_PERCENTILE = 0.65
+        private const val BASE_GLYPH_MIN_RATIO = 0.84
+        private const val RUBY_SIZE_RATIO = 0.76
+        private const val EXTREME_RUBY_SIZE_RATIO = 0.48
+        private const val RUBY_AXIS_OVERLAP_RATIO = 0.20
+        private const val RUBY_MAX_GAP_RATIO = 1.45
     }
 }
